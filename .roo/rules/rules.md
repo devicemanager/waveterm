@@ -34,11 +34,15 @@ It has a TypeScript/React frontend and a Go backend. They talk together over `ws
     - Use all lowercase filenames (except where case is actually important like Taskfile.yml)
     - Import the "cn" function from "@/util/util" to do classname / clsx class merge (it uses twMerge underneath)
     - For element variants use class-variance-authority
+    - Do NOT create private fields in classes (they are impossible to inspect)
+    - Use PascalCase for global consts at the top of files
   - **Component Practices**:
     - Make sure to add cursor-pointer to buttons/links and clickable items
     - NEVER use cursor-help (it looks terrible)
     - useAtom() and useAtomValue() are react HOOKS, so they must be called at the component level not inline in JSX
     - If you use React.memo(), make sure to add a displayName for the component
+  - Other
+    - never use atob() or btoa() (not UTF-8 safe). use functions in frontend/util/util.ts for base64 decoding and encoding
 - In general, when writing functions, we prefer _early returns_ rather than putting the majority of a function inside of an if block.
 
 ### Styling
@@ -46,6 +50,25 @@ It has a TypeScript/React frontend and a Go backend. They talk together over `ws
 - We use **Tailwind v4** to style. Custom stuff is defined in frontend/tailwindsetup.css
 - _never_ use cursor-help, or cursor-not-allowed (it looks terrible)
 - We have custom CSS setup as well, so it is a hybrid system. For new code we prefer tailwind, and are working to migrate code to all use tailwind.
+- For accent buttons, use "bg-accent/80 text-primary rounded hover:bg-accent transition-colors cursor-pointer" (if you do "bg-accent hover:bg-accent/80" it looks weird as on hover the button gets darker instead of lighter)
+
+### RPC System
+
+To define a new RPC call, add the new definition to `pkg/wshrpc/wshrpctypes.go` including any input/output data that is required. After modifying wshrpctypes.go run `task generate` to generate the client APIs.
+
+For normal "server" RPCs (where a frontend client is calling the main server) you should implement the RPC call in `pkg/wshrpc/wshserver.go`.
+
+### Electron API
+
+From within the FE to get the electron API (e.g. the preload functions):
+
+```
+import { getApi } from "@/store/global";
+
+getApi().getIsDev()
+```
+
+The full API is defined in custom.d.ts as type ElectronApi.
 
 ### Code Generation
 
@@ -80,6 +103,7 @@ These files provide step-by-step instructions, code examples, and best practices
 - **Match response length to question complexity** - For simple, direct questions in Ask mode (especially those that can be answered in 1-2 sentences), provide equally brief answers. Save detailed explanations for complex topics or when explicitly requested.
 - **CRITICAL** - useAtomValue and useAtom are React HOOKS. They cannot be used inline in JSX code, they must appear at the top of a component in the hooks area of the react code.
 - for simple functions, we prefer `if (!cond) { return }; functionality;` pattern overn `if (cond) { functionality }` because it produces less indentation and is easier to follow.
+- It is now 2026, so if you write new files use 2026 for the copyright year
 
 ### Strict Comment Rules
 
@@ -99,6 +123,7 @@ These files provide step-by-step instructions, code examples, and best practices
   - Explaining complex algorithms that can't be simplified
 - **When in doubt, leave it out**. No comment is better than a redundant comment.
 - **Never add comments explaining code changes** - The code should speak for itself, and version control tracks changes. The one exception to this rule is if it is a very unobvious implementation. Something that someone would typically implement in a different (wrong) way. Then the comment helps us remember WHY we changed it to a less obvious implementation.
+- **Never remove existing comments** unless specifically directed by the user. Comments that are already defined in existing code have been vetted by the user.
 
 ### Jotai Model Pattern (our rules)
 

@@ -18,9 +18,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wavetermdev/waveterm/pkg/util/envutil"
 	"github.com/wavetermdev/waveterm/pkg/util/utilfn"
+	"github.com/wavetermdev/waveterm/pkg/utilds"
 	"github.com/wavetermdev/waveterm/pkg/wavebase"
 	"github.com/wavetermdev/waveterm/pkg/waveobj"
+	"github.com/wavetermdev/waveterm/pkg/wconfig"
 )
 
 var (
@@ -39,11 +42,16 @@ var (
 	//go:embed shellintegration/bash_bashrc.sh
 	BashStartup_Bashrc string
 
+	//go:embed shellintegration/bash_preexec.sh
+	BashStartup_Preexec string
+
 	//go:embed shellintegration/fish_wavefish.sh
 	FishStartup_Wavefish string
 
 	//go:embed shellintegration/pwsh_wavepwsh.sh
 	PwshStartup_wavepwsh string
+
+	ZshExtendedHistoryPattern = regexp.MustCompile(`^: [0-9]+:`)
 )
 
 const DefaultTermType = "xterm-256color"
@@ -53,6 +61,8 @@ const DefaultTermCols = 80
 var cachedMacUserShell string
 var macUserShellOnce = &sync.Once{}
 var userShellRegexp = regexp.MustCompile(`^UserShell: (.*)$`)
+
+var gitBashCache = utilds.MakeSyncCache(findInstalledGitBash)
 
 const DefaultShellPath = "/bin/bash"
 
@@ -71,6 +81,7 @@ const (
 	PwshIntegrationDir = "shell/pwsh"
 	FishIntegrationDir = "shell/fish"
 	WaveHomeBinDir     = "bin"
+	ZshHistoryFileName = ".zsh_history"
 )
 
 func DetectLocalShellPath() string {
@@ -123,6 +134,81 @@ func internalMacUserShell() string {
 		return DefaultShellPath
 	}
 	return m[1]
+}
+
+func hasDirPart(dir string, part string) bool {
+	dir = filepath.Clean(dir)
+	part = strings.ToLower(part)
+	for {
+		base := strings.ToLower(filepath.Base(dir))
+		if base == part {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return false
+}
+
+func FindGitBash(config *wconfig.FullConfigType, rescan bool) string {
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+
+	if config != nil && config.Settings.TermGitBashPath != "" {
+		return config.Settings.TermGitBashPath
+	}
+
+	path, _ := gitBashCache.Get(rescan)
+	return path
+}
+
+func findInstalledGitBash() (string, error) {
+	// Try PATH first (skip system32, and only accept if in a Git directory)
+	pathEnv := os.Getenv("PATH")
+	pathDirs := filepath.SplitList(pathEnv)
+	for _, dir := range pathDirs {
+		dir = strings.Trim(dir, `"`)
+		if hasDirPart(dir, "system32") {
+			continue
+		}
+		if !hasDirPart(dir, "git") {
+			continue
+		}
+		bashPath := filepath.Join(dir, "bash.exe")
+		if _, err := os.Stat(bashPath); err == nil {
+			return bashPath, nil
+		}
+	}
+
+	// Try scoop location
+	userProfile := os.Getenv("USERPROFILE")
+	if userProfile != "" {
+		scoopPath := filepath.Join(userProfile, "scoop", "apps", "git", "current", "bin", "bash.exe")
+		if _, err := os.Stat(scoopPath); err == nil {
+			return scoopPath, nil
+		}
+	}
+
+	// Try LocalAppData\programs\git\bin
+	localAppData := os.Getenv("LOCALAPPDATA")
+	if localAppData != "" {
+		localPath := filepath.Join(localAppData, "programs", "git", "bin", "bash.exe")
+		if _, err := os.Stat(localPath); err == nil {
+			return localPath, nil
+		}
+	}
+
+	// Try C:\Program Files\Git\bin
+	programFilesPath := filepath.Join("C:\\", "Program Files", "Git", "bin", "bash.exe")
+	if _, err := os.Stat(programFilesPath); err == nil {
+		return programFilesPath, nil
+	}
+
+	return "", nil
 }
 
 func DefaultTermSize() waveobj.TermSize {
@@ -205,6 +291,46 @@ func GetLocalZshZDotDir() string {
 	return filepath.Join(wavebase.GetWaveDataDir(), ZshIntegrationDir)
 }
 
+func HasWaveZshHistory() (bool, int64) {
+	zshDir := GetLocalZshZDotDir()
+	historyFile := filepath.Join(zshDir, ZshHistoryFileName)
+	fileInfo, err := os.Stat(historyFile)
+	if err != nil {
+		return false, 0
+	}
+	return true, fileInfo.Size()
+}
+
+func IsExtendedZshHistoryFile(fileName string) (bool, error) {
+	file, err := os.Open(fileName)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer file.Close()
+
+	buf := make([]byte, 1024)
+	n, err := file.Read(buf)
+	if err != nil {
+		return false, err
+	}
+
+	content := string(buf[:n])
+	lines := strings.Split(content, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		return ZshExtendedHistoryPattern.MatchString(line), nil
+	}
+
+	return false, nil
+}
+
 func GetLocalWshBinaryPath(version string, goos string, goarch string) (string, error) {
 	ext := ""
 	if goarch == "amd64" {
@@ -280,6 +406,10 @@ func InitRcFiles(waveHome string, absWshBinDir string) error {
 	err = utilfn.WriteTemplateToFile(filepath.Join(bashDir, ".bashrc"), BashStartup_Bashrc, params)
 	if err != nil {
 		return fmt.Errorf("error writing bash-integration .bashrc: %v", err)
+	}
+	err = os.WriteFile(filepath.Join(bashDir, "bash_preexec.sh"), []byte(BashStartup_Preexec), 0644)
+	if err != nil {
+		return fmt.Errorf("error writing bash-integration bash_preexec.sh: %v", err)
 	}
 	err = utilfn.WriteTemplateToFile(filepath.Join(fishDir, "wave.fish"), FishStartup_Wavefish, params)
 	if err != nil {
@@ -413,6 +543,101 @@ func getShellVersion(shellPath string, shellType string) (string, error) {
 	}
 
 	return matches[1], nil
+}
+
+func FixupWaveZshHistory() error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+
+	hasHistory, size := HasWaveZshHistory()
+	if !hasHistory {
+		return nil
+	}
+
+	zshDir := GetLocalZshZDotDir()
+	waveHistFile := filepath.Join(zshDir, ZshHistoryFileName)
+
+	if size == 0 {
+		err := os.Remove(waveHistFile)
+		if err != nil {
+			log.Printf("error removing wave zsh history file %s: %v\n", waveHistFile, err)
+		}
+		return nil
+	}
+
+	log.Printf("merging wave zsh history %s into ~/.zsh_history\n", waveHistFile)
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("error getting home directory: %w", err)
+	}
+	realHistFile := filepath.Join(homeDir, ".zsh_history")
+
+	isExtended, err := IsExtendedZshHistoryFile(realHistFile)
+	if err != nil {
+		return fmt.Errorf("error checking if history is extended: %w", err)
+	}
+
+	hasExtendedStr := "false"
+	if isExtended {
+		hasExtendedStr = "true"
+	}
+
+	quotedWaveHistFile := utilfn.ShellQuote(waveHistFile, true, -1)
+
+	script := fmt.Sprintf(`
+		HISTFILE=~/.zsh_history
+		HISTSIZE=999999
+		SAVEHIST=999999
+		has_extended_history=%s
+		[[ $has_extended_history == true ]] && setopt EXTENDED_HISTORY
+		fc -RI
+		fc -RI %s
+		fc -W
+	`, hasExtendedStr, quotedWaveHistFile)
+
+	ctx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelFn()
+
+	cmd := exec.CommandContext(ctx, "zsh", "-f", "-i", "-c", script)
+	cmd.Stdin = nil
+	envStr := envutil.SliceToEnv(os.Environ())
+	envStr = envutil.RmEnv(envStr, "ZDOTDIR")
+	cmd.Env = envutil.EnvToSlice(envStr)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("error executing zsh history fixup script: %w, output: %s", err, string(output))
+	}
+
+	err = os.Remove(waveHistFile)
+	if err != nil {
+		log.Printf("error removing wave zsh history file %s: %v\n", waveHistFile, err)
+	}
+	log.Printf("successfully merged wave zsh history %s into ~/.zsh_history\n", waveHistFile)
+
+	return nil
+}
+
+func GetTerminalResetSeq() string {
+	resetSeq := "\x1b[0m"             // reset attributes
+	resetSeq += "\x1b[?25h"           // show cursor
+	resetSeq += "\x1b[?1l"            // normal cursor keys
+	resetSeq += "\x1b[?7h"            // wraparound on
+	resetSeq += "\x1b[?45l"           // reverse wraparound off
+	resetSeq += "\x1b[?66l"           // application keypad off (DECNKM)
+	resetSeq += "\x1b[4l"             // insert mode off (IRM)
+	resetSeq += "\x1b[?9l"            // X10 mouse tracking off
+	resetSeq += "\x1b[?1000l"         // disable Send Mouse X & Y on button press
+	resetSeq += "\x1b[?1002l"         // disable Use Cell Motion Mouse Tracking
+	resetSeq += "\x1b[?1003l"         // disable Use All Motion Mouse Tracking
+	resetSeq += "\x1b[?1004l"         // disable Send FocusIn/FocusOut events
+	resetSeq += "\x1b[?1006l"         // disable Enable SGR Mouse Mode
+	resetSeq += "\x1b[?1007l"         // disable Enable Alternate Scroll Mode
+	resetSeq += "\x1b[?2004l"         // disable bracketed paste mode
+	resetSeq += "\x1b[?2026l"         // synchronized output off
+	resetSeq += FormatOSC(16162, "R") // disable alternate screen mode
+	return resetSeq
 }
 
 func FormatOSC(oscNum int, parts ...string) string {

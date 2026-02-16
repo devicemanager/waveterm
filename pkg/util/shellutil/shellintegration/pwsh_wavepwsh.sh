@@ -12,6 +12,12 @@ Remove-Item Env:WAVETERM_SWAPTOKEN
 # Load Wave completions
 wsh completion powershell | Out-String | Invoke-Expression
 
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    return  # skip OSC setup entirely
+}
+
+$Global:_WAVETERM_SI_FIRSTPROMPT = $true
+
 # shell integration
 function Global:_waveterm_si_blocked {
     # Check if we're in tmux or screen
@@ -21,21 +27,23 @@ function Global:_waveterm_si_blocked {
 function Global:_waveterm_si_osc7 {
     if (_waveterm_si_blocked) { return }
     
-    # Get hostname (allow empty for file:/// format)
-    $hostname = $env:COMPUTERNAME
-    if (-not $hostname) {
-        $hostname = $env:HOSTNAME
-    }
-    
     # Percent-encode the raw path as-is (handles UNC, drive letters, etc.)
     $encoded_pwd = [System.Uri]::EscapeDataString($PWD.Path)
     
     # OSC 7 - current directory
-    Write-Host -NoNewline "`e]7;file://$hostname/$encoded_pwd`a"
+    Write-Host -NoNewline "`e]7;file://localhost/$encoded_pwd`a"
 }
 
-# Hook OSC 7 to prompt
 function Global:_waveterm_si_prompt {
+    if (_waveterm_si_blocked) { return }
+    
+    if ($Global:_WAVETERM_SI_FIRSTPROMPT) {
+		# not sending uname
+		       $shellversion = $PSVersionTable.PSVersion.ToString()
+		       Write-Host -NoNewline "`e]16162;M;{`"shell`":`"pwsh`",`"shellversion`":`"$shellversion`",`"integration`":false}`a"
+        $Global:_WAVETERM_SI_FIRSTPROMPT = $false
+    }
+    
     _waveterm_si_osc7
 }
 

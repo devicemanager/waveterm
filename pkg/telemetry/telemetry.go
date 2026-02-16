@@ -153,12 +153,19 @@ func mergeActivity(curActivity *telemetrydata.TEventProps, newActivity telemetry
 	curActivity.OpenMinutes += newActivity.OpenMinutes
 	curActivity.WaveAIActiveMinutes += newActivity.WaveAIActiveMinutes
 	curActivity.WaveAIFgMinutes += newActivity.WaveAIFgMinutes
+	curActivity.TermCommandsRun += newActivity.TermCommandsRun
+	curActivity.TermCommandsRemote += newActivity.TermCommandsRemote
+	curActivity.TermCommandsDurable += newActivity.TermCommandsDurable
+	curActivity.TermCommandsWsl += newActivity.TermCommandsWsl
+	if newActivity.AppFirstDay {
+		curActivity.AppFirstDay = true
+	}
 }
 
 // ignores the timestamp in tevent, and uses the current time
 func updateActivityTEvent(ctx context.Context, tevent *telemetrydata.TEvent) error {
 	eventTs := time.Now()
-	// compute to hour boundary, and round up to next hour
+	// compute to 1-hour boundary, and round up to next 1-hour boundary
 	eventTs = eventTs.Truncate(time.Hour).Add(time.Hour)
 
 	return wstore.WithTx(ctx, func(tx *wstore.TxWrap) error {
@@ -237,10 +244,16 @@ func RecordTEvent(ctx context.Context, tevent *telemetrydata.TEvent) error {
 	}
 	tevent.EnsureTimestamps()
 
-	// Set AppFirstDay if within first day of TOS agreement
+	// Set AppFirstDay if on same calendar day as TOS agreement
 	tosAgreedTs := GetTosAgreedTs()
-	if tosAgreedTs == 0 || (tosAgreedTs != 0 && time.Now().UnixMilli()-tosAgreedTs <= int64(24*60*60*1000)) {
+	if tosAgreedTs == 0 {
 		tevent.Props.AppFirstDay = true
+	} else {
+		tosYear, tosMonth, tosDay := time.UnixMilli(tosAgreedTs).Date()
+		nowYear, nowMonth, nowDay := time.Now().Date()
+		if tosYear == nowYear && tosMonth == nowMonth && tosDay == nowDay {
+			tevent.Props.AppFirstDay = true
+		}
 	}
 
 	if tevent.Event == ActivityEventName {
@@ -250,10 +263,13 @@ func RecordTEvent(ctx context.Context, tevent *telemetrydata.TEvent) error {
 }
 
 func CleanOldTEvents(ctx context.Context) error {
+	daysToKeep := 7
+	if !IsTelemetryEnabled() {
+		daysToKeep = 1
+	}
+	olderThan := time.Now().AddDate(0, 0, -daysToKeep).UnixMilli()
 	return wstore.WithTx(ctx, func(tx *wstore.TxWrap) error {
-		// delete events older than 28 days
 		query := `DELETE FROM db_tevent WHERE ts < ?`
-		olderThan := time.Now().AddDate(0, 0, -28).UnixMilli()
 		tx.Exec(query, olderThan)
 		return nil
 	})

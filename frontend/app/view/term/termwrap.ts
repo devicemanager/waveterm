@@ -1,11 +1,20 @@
 // Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { BlockNodeModel } from "@/app/block/blocktypes";
 import { getFileSubject } from "@/app/store/wps";
-import { sendWSCommand } from "@/app/store/ws";
 import { RpcApi } from "@/app/store/wshclientapi";
 import { TabRpcClient } from "@/app/store/wshrpcutil";
-import { WOS, atoms, fetchWaveFile, getSettingsKeyAtom, globalStore, openLink } from "@/store/global";
+import {
+    atoms,
+    fetchWaveFile,
+    getOverrideConfigAtom,
+    getSettingsKeyAtom,
+    globalStore,
+    openLink,
+    setTabIndicator,
+    WOS,
+} from "@/store/global";
 import * as services from "@/store/services";
 import { PLATFORM, PlatformMacOS } from "@/util/platformutil";
 import { base64ToArray, fireAndForget } from "@/util/util";
@@ -16,14 +25,23 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import * as TermTypes from "@xterm/xterm";
 import { Terminal } from "@xterm/xterm";
 import debug from "debug";
+import * as jotai from "jotai";
 import { debounce } from "throttle-debounce";
 import { FitAddon } from "./fitaddon";
+import {
+    handleOsc16162Command,
+    handleOsc52Command,
+    handleOsc7Command,
+    type ShellIntegrationStatus,
+} from "./osc-handlers";
+import { createTempFileFromBlob, extractAllClipboardData } from "./termutil";
 
 const dlog = debug("wave:termwrap");
 
 const TermFileName = "term";
 const TermCacheFileName = "cache:term:full";
 const MinDataProcessedForCache = 100 * 1024;
+export const SupportsImageInput = true;
 
 // detect webgl support
 function detectWebGLSupport(): boolean {
@@ -43,231 +61,11 @@ type TermWrapOptions = {
     keydownHandler?: (e: KeyboardEvent) => boolean;
     useWebGl?: boolean;
     sendDataHandler?: (data: string) => void;
+    nodeModel?: BlockNodeModel;
 };
 
-function handleOscWaveCommand(data: string, blockId: string, loaded: boolean): boolean {
-    if (!loaded) {
-        return true;
-    }
-    if (!data || data.length === 0) {
-        console.log("Invalid Wave OSC command received (empty)");
-        return true;
-    }
-
-    // Expected formats:
-    // "setmeta;{JSONDATA}"
-    // "setmeta;[wave-id];{JSONDATA}"
-    const parts = data.split(";");
-    if (parts[0] !== "setmeta") {
-        console.log("Invalid Wave OSC command received (bad command)", data);
-        return true;
-    }
-    let jsonPayload: string;
-    let waveId: string | undefined;
-    if (parts.length === 2) {
-        jsonPayload = parts[1];
-    } else if (parts.length >= 3) {
-        waveId = parts[1];
-        jsonPayload = parts.slice(2).join(";");
-    } else {
-        console.log("Invalid Wave OSC command received (1 part)", data);
-        return true;
-    }
-
-    let meta: any;
-    try {
-        meta = JSON.parse(jsonPayload);
-    } catch (e) {
-        console.error("Invalid JSON in Wave OSC command:", e);
-        return true;
-    }
-
-    if (waveId) {
-        // Resolve the wave id to an ORef using our ResolveIdsCommand.
-        fireAndForget(() => {
-            return RpcApi.ResolveIdsCommand(TabRpcClient, { blockid: blockId, ids: [waveId] })
-                .then((response: { resolvedids: { [key: string]: any } }) => {
-                    const oref = response.resolvedids[waveId];
-                    if (!oref) {
-                        console.error("Failed to resolve wave id:", waveId);
-                        return;
-                    }
-                    services.ObjectService.UpdateObjectMeta(oref, meta);
-                })
-                .catch((err: any) => {
-                    console.error("Error resolving wave id", waveId, err);
-                });
-        });
-    } else {
-        // No wave id provided; update using the current block id.
-        fireAndForget(() => {
-            return services.ObjectService.UpdateObjectMeta(WOS.makeORef("block", blockId), meta);
-        });
-    }
-    return true;
-}
-
-// for xterm handlers, we return true always because we "own" OSC 7.
-// even if it is invalid we dont want to propagate to other handlers
-function handleOsc7Command(data: string, blockId: string, loaded: boolean): boolean {
-    if (!loaded) {
-        return true;
-    }
-    if (data == null || data.length == 0) {
-        console.log("Invalid OSC 7 command received (empty)");
-        return true;
-    }
-    if (data.length > 1024) {
-        console.log("Invalid OSC 7, data length too long", data.length);
-        return true;
-    }
-
-    let pathPart: string;
-    try {
-        const url = new URL(data);
-        if (url.protocol !== "file:") {
-            console.log("Invalid OSC 7 command received (non-file protocol)", data);
-            return true;
-        }
-        pathPart = decodeURIComponent(url.pathname);
-
-        // Normalize double slashes at the beginning to single slash
-        if (pathPart.startsWith("//")) {
-            pathPart = pathPart.substring(1);
-        }
-
-        // Handle Windows paths (e.g., /C:/... or /D:\...)
-        if (/^\/[a-zA-Z]:[\\/]/.test(pathPart)) {
-            // Strip leading slash and normalize to forward slashes
-            pathPart = pathPart.substring(1).replace(/\\/g, "/");
-        }
-    } catch (e) {
-        console.log("Invalid OSC 7 command received (parse error)", data, e);
-        return true;
-    }
-
-    setTimeout(() => {
-        fireAndForget(async () => {
-            await services.ObjectService.UpdateObjectMeta(WOS.makeORef("block", blockId), {
-                "cmd:cwd": pathPart,
-            });
-
-            const rtInfo = { "cmd:hascurcwd": true };
-            const rtInfoData: CommandSetRTInfoData = {
-                oref: WOS.makeORef("block", blockId),
-                data: rtInfo,
-            };
-            await RpcApi.SetRTInfoCommand(TabRpcClient, rtInfoData).catch((e) =>
-                console.log("error setting RT info", e)
-            );
-        });
-    }, 0);
-    return true;
-}
-
-// OSC 16162 - Shell Integration Commands
-// See aiprompts/wave-osc-16162.md for full documentation
-type Osc16162Command =
-    | { command: "A"; data: {} }
-    | { command: "C"; data: { cmd64?: string } }
-    | { command: "M"; data: { shell?: string; shellversion?: string; uname?: string } }
-    | { command: "D"; data: { exitcode?: number } }
-    | { command: "I"; data: { inputempty?: boolean } }
-    | { command: "R"; data: {} };
-
-function handleOsc16162Command(data: string, blockId: string, loaded: boolean, terminal: Terminal): boolean {
-    if (!loaded) {
-        return true;
-    }
-    if (!data || data.length === 0) {
-        return true;
-    }
-
-    const parts = data.split(";");
-    const commandStr = parts[0];
-    const jsonDataStr = parts.length > 1 ? parts.slice(1).join(";") : null;
-    let parsedData: Record<string, any> = {};
-    if (jsonDataStr) {
-        try {
-            parsedData = JSON.parse(jsonDataStr);
-        } catch (e) {
-            console.error("Error parsing OSC 16162 JSON data:", e);
-        }
-    }
-
-    const cmd: Osc16162Command = { command: commandStr, data: parsedData } as Osc16162Command;
-    const rtInfo: ObjRTInfo = {};
-    switch (cmd.command) {
-        case "A":
-            rtInfo["shell:state"] = "ready";
-            break;
-        case "C":
-            rtInfo["shell:state"] = "running-command";
-            if (cmd.data.cmd64) {
-                const decodedLen = Math.ceil(cmd.data.cmd64.length * 0.75);
-                if (decodedLen > 8192) {
-                    rtInfo["shell:lastcmd"] = `# command too large (${decodedLen} bytes)`;
-                } else {
-                    try {
-                        const decodedCmd = atob(cmd.data.cmd64);
-                        rtInfo["shell:lastcmd"] = decodedCmd;
-                    } catch (e) {
-                        console.error("Error decoding cmd64:", e);
-                        rtInfo["shell:lastcmd"] = null;
-                    }
-                }
-            } else {
-                rtInfo["shell:lastcmd"] = null;
-            }
-            break;
-        case "M":
-            if (cmd.data.shell) {
-                rtInfo["shell:type"] = cmd.data.shell;
-            }
-            if (cmd.data.shellversion) {
-                rtInfo["shell:version"] = cmd.data.shellversion;
-            }
-            if (cmd.data.uname) {
-                rtInfo["shell:uname"] = cmd.data.uname;
-            }
-            break;
-        case "D":
-            if (cmd.data.exitcode != null) {
-                rtInfo["shell:lastcmdexitcode"] = cmd.data.exitcode;
-            } else {
-                rtInfo["shell:lastcmdexitcode"] = null;
-            }
-            break;
-        case "I":
-            if (cmd.data.inputempty != null) {
-                rtInfo["shell:inputempty"] = cmd.data.inputempty;
-            }
-            break;
-        case "R":
-            if (terminal.buffer.active.type === "alternate") {
-                terminal.write("\x1b[?1049l");
-            }
-            break;
-    }
-
-    if (Object.keys(rtInfo).length > 0) {
-        setTimeout(() => {
-            fireAndForget(async () => {
-                const rtInfoData: CommandSetRTInfoData = {
-                    oref: WOS.makeORef("block", blockId),
-                    data: rtInfo,
-                };
-                await RpcApi.SetRTInfoCommand(TabRpcClient, rtInfoData).catch((e) =>
-                    console.log("error setting RT info (OSC 16162)", e)
-                );
-            });
-        }, 0);
-    }
-
-    return true;
-}
-
 export class TermWrap {
+    tabId: string;
     blockId: string;
     ptyOffset: number;
     dataBytesProcessed: number;
@@ -287,20 +85,44 @@ export class TermWrap {
     private toDispose: TermTypes.IDisposable[] = [];
     pasteActive: boolean = false;
     lastUpdated: number;
+    promptMarkers: TermTypes.IMarker[] = [];
+    shellIntegrationStatusAtom: jotai.PrimitiveAtom<ShellIntegrationStatus | null>;
+    lastCommandAtom: jotai.PrimitiveAtom<string | null>;
+    nodeModel: BlockNodeModel; // this can be null
+
+    // IME composition state tracking
+    // Prevents duplicate input when switching input methods during composition (e.g., using Capslock)
+    // xterm.js sends data during compositionupdate AND after compositionend, causing duplicates
+    isComposing: boolean = false;
+    composingData: string = "";
+    lastCompositionEnd: number = 0;
+    lastComposedText: string = "";
+    firstDataAfterCompositionSent: boolean = false;
+
+    // Paste deduplication
+    // xterm.js paste() method triggers onData event, which can cause duplicate sends
+    lastPasteData: string = "";
+    lastPasteTime: number = 0;
 
     constructor(
+        tabId: string,
         blockId: string,
         connectElem: HTMLDivElement,
         options: TermTypes.ITerminalOptions & TermTypes.ITerminalInitOnlyOptions,
         waveOptions: TermWrapOptions
     ) {
         this.loaded = false;
+        this.tabId = tabId;
         this.blockId = blockId;
         this.sendDataHandler = waveOptions.sendDataHandler;
+        this.nodeModel = waveOptions.nodeModel;
         this.ptyOffset = 0;
         this.dataBytesProcessed = 0;
         this.hasResized = false;
         this.lastUpdated = Date.now();
+        this.promptMarkers = [];
+        this.shellIntegrationStatusAtom = jotai.atom(null) as jotai.PrimitiveAtom<ShellIntegrationStatus | null>;
+        this.lastCommandAtom = jotai.atom(null) as jotai.PrimitiveAtom<string | null>;
         this.terminal = new Terminal(options);
         this.fitAddon = new FitAddon();
         this.fitAddon.noScrollbar = PLATFORM === PlatformMacOS;
@@ -339,16 +161,36 @@ export class TermWrap {
                 loggedWebGL = true;
             }
         }
-        // Register OSC 9283 handler
-        this.terminal.parser.registerOscHandler(9283, (data: string) => {
-            return handleOscWaveCommand(data, this.blockId, this.loaded);
-        });
+        // Register OSC handlers
         this.terminal.parser.registerOscHandler(7, (data: string) => {
             return handleOsc7Command(data, this.blockId, this.loaded);
         });
-        this.terminal.parser.registerOscHandler(16162, (data: string) => {
-            return handleOsc16162Command(data, this.blockId, this.loaded, this.terminal);
+        this.terminal.parser.registerOscHandler(52, (data: string) => {
+            return handleOsc52Command(data, this.blockId, this.loaded, this);
         });
+        this.terminal.parser.registerOscHandler(16162, (data: string) => {
+            return handleOsc16162Command(data, this.blockId, this.loaded, this);
+        });
+        this.toDispose.push(
+            this.terminal.onBell(() => {
+                if (!this.loaded) {
+                    return true;
+                }
+                console.log("BEL received in terminal", this.blockId);
+                const bellSoundEnabled =
+                    globalStore.get(getOverrideConfigAtom(this.blockId, "term:bellsound")) ?? false;
+                if (bellSoundEnabled) {
+                    fireAndForget(() => RpcApi.ElectronSystemBellCommand(TabRpcClient, { route: "electron" }));
+                }
+                const bellIndicatorEnabled =
+                    globalStore.get(getOverrideConfigAtom(this.blockId, "term:bellindicator")) ?? false;
+                if (bellIndicatorEnabled) {
+                    const tabId = globalStore.get(atoms.staticTabId);
+                    setTabIndicator(tabId, { icon: "bell", color: "#fbbf24", clearonfocus: true, priority: 1 });
+                }
+                return true;
+            })
+        );
         this.terminal.attachCustomKeyEventHandler(waveOptions.keydownHandler);
         this.connectElem = connectElem;
         this.mainFileSubject = null;
@@ -356,20 +198,42 @@ export class TermWrap {
         this.handleResize_debounced = debounce(50, this.handleResize.bind(this));
         this.terminal.open(this.connectElem);
         this.handleResize();
-        let pasteEventHandler = () => {
-            this.pasteActive = true;
-            setTimeout(() => {
-                this.pasteActive = false;
-            }, 30);
-        };
-        pasteEventHandler = pasteEventHandler.bind(this);
-        this.connectElem.addEventListener("paste", pasteEventHandler, true);
+        const pasteHandler = this.pasteHandler.bind(this);
+        this.connectElem.addEventListener("paste", pasteHandler, true);
         this.toDispose.push({
             dispose: () => {
-                this.connectElem.removeEventListener("paste", pasteEventHandler, true);
+                this.connectElem.removeEventListener("paste", pasteHandler, true);
             },
         });
     }
+
+    getZoneId(): string {
+        return this.blockId;
+    }
+
+    resetCompositionState() {
+        this.isComposing = false;
+        this.composingData = "";
+    }
+
+    private handleCompositionStart = (e: CompositionEvent) => {
+        dlog("compositionstart", e.data);
+        this.isComposing = true;
+        this.composingData = "";
+    };
+
+    private handleCompositionUpdate = (e: CompositionEvent) => {
+        dlog("compositionupdate", e.data);
+        this.composingData = e.data || "";
+    };
+
+    private handleCompositionEnd = (e: CompositionEvent) => {
+        dlog("compositionend", e.data);
+        this.isComposing = false;
+        this.lastComposedText = e.data || "";
+        this.lastCompositionEnd = Date.now();
+        this.firstDataAfterCompositionSent = false;
+    };
 
     async initTerminal() {
         const copyOnSelectAtom = getSettingsKeyAtom("term:copyonselect");
@@ -391,8 +255,54 @@ export class TermWrap {
         if (this.onSearchResultsDidChange != null) {
             this.toDispose.push(this.searchAddon.onDidChangeResults(this.onSearchResultsDidChange.bind(this)));
         }
-        this.mainFileSubject = getFileSubject(this.blockId, TermFileName);
+
+        // Register IME composition event listeners on the xterm.js textarea
+        const textareaElem = this.connectElem.querySelector("textarea");
+        if (textareaElem) {
+            textareaElem.addEventListener("compositionstart", this.handleCompositionStart);
+            textareaElem.addEventListener("compositionupdate", this.handleCompositionUpdate);
+            textareaElem.addEventListener("compositionend", this.handleCompositionEnd);
+
+            // Handle blur during composition - reset state to avoid stale data
+            const blurHandler = () => {
+                if (this.isComposing) {
+                    dlog("Terminal lost focus during composition, resetting IME state");
+                    this.resetCompositionState();
+                }
+            };
+            textareaElem.addEventListener("blur", blurHandler);
+
+            this.toDispose.push({
+                dispose: () => {
+                    textareaElem.removeEventListener("compositionstart", this.handleCompositionStart);
+                    textareaElem.removeEventListener("compositionupdate", this.handleCompositionUpdate);
+                    textareaElem.removeEventListener("compositionend", this.handleCompositionEnd);
+                    textareaElem.removeEventListener("blur", blurHandler);
+                },
+            });
+        }
+
+        this.mainFileSubject = getFileSubject(this.getZoneId(), TermFileName);
         this.mainFileSubject.subscribe(this.handleNewFileSubjectData.bind(this));
+
+        try {
+            const rtInfo = await RpcApi.GetRTInfoCommand(TabRpcClient, {
+                oref: WOS.makeORef("block", this.blockId),
+            });
+
+            if (rtInfo && rtInfo["shell:integration"]) {
+                const shellState = rtInfo["shell:state"] as ShellIntegrationStatus;
+                globalStore.set(this.shellIntegrationStatusAtom, shellState || null);
+            } else {
+                globalStore.set(this.shellIntegrationStatusAtom, null);
+            }
+
+            const lastCmd = rtInfo ? rtInfo["shell:lastcmd"] : null;
+            globalStore.set(this.lastCommandAtom, lastCmd || null);
+        } catch (e) {
+            console.log("Error loading runtime info:", e);
+        }
+
         try {
             await this.loadInitialTerminalData();
         } finally {
@@ -402,6 +312,12 @@ export class TermWrap {
     }
 
     dispose() {
+        this.promptMarkers.forEach((marker) => {
+            try {
+                marker.dispose();
+            } catch (_) {}
+        });
+        this.promptMarkers = [];
         this.terminal.dispose();
         this.toDispose.forEach((d) => {
             try {
@@ -415,12 +331,41 @@ export class TermWrap {
         if (!this.loaded) {
             return;
         }
+
+        // IME Composition Handling
+        // Block all data during composition - only send the final text after compositionend
+        // This prevents xterm.js from sending intermediate composition data (e.g., during compositionupdate)
+        if (this.isComposing) {
+            dlog("Blocked data during composition:", data);
+            return;
+        }
+
         if (this.pasteActive) {
-            this.pasteActive = false;
             if (this.multiInputCallback) {
                 this.multiInputCallback(data);
             }
         }
+
+        // IME Deduplication (for Capslock input method switching)
+        // When switching input methods with Capslock during composition, some systems send the
+        // composed text twice. We allow the first send and block subsequent duplicates.
+        const IMEDedupWindowMs = 50;
+        const now = Date.now();
+        const timeSinceCompositionEnd = now - this.lastCompositionEnd;
+        if (timeSinceCompositionEnd < IMEDedupWindowMs && data === this.lastComposedText && this.lastComposedText) {
+            if (!this.firstDataAfterCompositionSent) {
+                // First send after composition - allow it but mark as sent
+                this.firstDataAfterCompositionSent = true;
+                dlog("First data after composition, allowing:", data);
+            } else {
+                // Second send of the same data - this is a duplicate from Capslock switching, block it
+                dlog("Blocked duplicate IME data:", data);
+                this.lastComposedText = ""; // Clear to allow same text to be typed again later
+                this.firstDataAfterCompositionSent = false;
+                return;
+            }
+        }
+
         this.sendDataHandler?.(data);
     }
 
@@ -470,8 +415,9 @@ export class TermWrap {
     }
 
     async loadInitialTerminalData(): Promise<void> {
-        let startTs = Date.now();
-        const { data: cacheData, fileInfo: cacheFile } = await fetchWaveFile(this.blockId, TermCacheFileName);
+        const startTs = Date.now();
+        const zoneId = this.getZoneId();
+        const { data: cacheData, fileInfo: cacheFile } = await fetchWaveFile(zoneId, TermCacheFileName);
         let ptyOffset = 0;
         if (cacheFile != null) {
             ptyOffset = cacheFile.meta["ptyoffset"] ?? 0;
@@ -493,7 +439,7 @@ export class TermWrap {
                 }
             }
         }
-        const { data: mainData, fileInfo: mainFile } = await fetchWaveFile(this.blockId, TermFileName, ptyOffset);
+        const { data: mainData, fileInfo: mainFile } = await fetchWaveFile(zoneId, TermFileName, ptyOffset);
         console.log(
             `terminal loaded cachefile:${cacheData?.byteLength ?? 0} main:${mainData?.byteLength ?? 0} bytes, ${Date.now() - startTs}ms`
         );
@@ -504,11 +450,10 @@ export class TermWrap {
 
     async resyncController(reason: string) {
         dlog("resync controller", this.blockId, reason);
-        const tabId = globalStore.get(atoms.staticTabId);
         const rtOpts: RuntimeOpts = { termsize: { rows: this.terminal.rows, cols: this.terminal.cols } };
         try {
             await RpcApi.ControllerResyncCommand(TabRpcClient, {
-                tabid: tabId,
+                tabid: this.tabId,
                 blockid: this.blockId,
                 rtopts: rtOpts,
             });
@@ -523,12 +468,7 @@ export class TermWrap {
         this.fitAddon.fit();
         if (oldRows !== this.terminal.rows || oldCols !== this.terminal.cols) {
             const termSize: TermSize = { rows: this.terminal.rows, cols: this.terminal.cols };
-            const wsCommand: SetBlockTermSizeWSCommand = {
-                wscommand: "setblocktermsize",
-                blockid: this.blockId,
-                termsize: termSize,
-            };
-            sendWSCommand(wsCommand);
+            RpcApi.ControllerInputCommand(TabRpcClient, { blockid: this.blockId, termsize: termSize });
         }
         dlog("resize", `${this.terminal.rows}x${this.terminal.cols}`, `${oldRows}x${oldCols}`, this.hasResized);
         if (!this.hasResized) {
@@ -557,5 +497,35 @@ export class TermWrap {
                 this.runProcessIdleTimeout();
             });
         }, 5000);
+    }
+
+    async pasteHandler(e?: ClipboardEvent): Promise<void> {
+        this.pasteActive = true;
+        e?.preventDefault();
+        e?.stopPropagation();
+
+        try {
+            const clipboardData = await extractAllClipboardData(e);
+            let firstImage = true;
+            for (const data of clipboardData) {
+                if (data.image && SupportsImageInput) {
+                    if (!firstImage) {
+                        await new Promise((r) => setTimeout(r, 150));
+                    }
+                    const tempPath = await createTempFileFromBlob(data.image);
+                    this.terminal.paste(tempPath + " ");
+                    firstImage = false;
+                }
+                if (data.text) {
+                    this.terminal.paste(data.text);
+                }
+            }
+        } catch (err) {
+            console.error("Paste error:", err);
+        } finally {
+            setTimeout(() => {
+                this.pasteActive = false;
+            }, 30);
+        }
     }
 }

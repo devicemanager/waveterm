@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -102,7 +103,132 @@ func truncateData(data string, origin string, maxBytes int) string {
 	return data[:truncateIdx+1]
 }
 
-func readTextFileCallback(input any) (any, error) {
+func isBlockedFile(expandedPath string) (bool, string) {
+	homeDir := os.Getenv("HOME")
+	if homeDir == "" {
+		homeDir = os.Getenv("USERPROFILE")
+	}
+
+	cleanPath := filepath.Clean(expandedPath)
+	baseName := filepath.Base(cleanPath)
+
+	exactPaths := []struct {
+		path   string
+		reason string
+	}{
+		{filepath.Join(homeDir, ".aws", "credentials"), "AWS credentials file"},
+		{filepath.Join(homeDir, ".git-credentials"), "Git credentials file"},
+		{filepath.Join(homeDir, ".netrc"), "netrc credentials file"},
+		{filepath.Join(homeDir, ".pgpass"), "PostgreSQL password file"},
+		{filepath.Join(homeDir, ".my.cnf"), "MySQL credentials file"},
+		{filepath.Join(homeDir, ".kube", "config"), "Kubernetes config file"},
+		{"/etc/shadow", "system password file"},
+		{"/etc/sudoers", "system sudoers file"},
+	}
+
+	for _, ep := range exactPaths {
+		if cleanPath == ep.path {
+			return true, ep.reason
+		}
+	}
+
+	dirPrefixes := []struct {
+		prefix string
+		reason string
+	}{
+		{filepath.Join(homeDir, ".gnupg") + string(filepath.Separator), "GPG directory"},
+		{filepath.Join(homeDir, ".password-store") + string(filepath.Separator), "password store directory"},
+		{"/etc/sudoers.d/", "system sudoers directory"},
+		{"/Library/Keychains/", "macOS keychain directory"},
+		{filepath.Join(homeDir, "Library", "Keychains") + string(filepath.Separator), "macOS keychain directory"},
+	}
+
+	for _, dp := range dirPrefixes {
+		if strings.HasPrefix(cleanPath, dp.prefix) {
+			return true, dp.reason
+		}
+	}
+
+	if strings.Contains(cleanPath, filepath.Join(homeDir, ".secrets")) {
+		return true, "secrets directory"
+	}
+
+	if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+		credPath := filepath.Join(localAppData, "Microsoft", "Credentials")
+		if strings.HasPrefix(cleanPath, credPath) {
+			return true, "Windows credentials"
+		}
+	}
+	if appData := os.Getenv("APPDATA"); appData != "" {
+		credPath := filepath.Join(appData, "Microsoft", "Credentials")
+		if strings.HasPrefix(cleanPath, credPath) {
+			return true, "Windows credentials"
+		}
+	}
+
+	if strings.HasPrefix(baseName, "id_") && strings.Contains(cleanPath, ".ssh") {
+		return true, "SSH private key"
+	}
+	if strings.Contains(baseName, "id_rsa") {
+		return true, "SSH private key"
+	}
+	if strings.HasPrefix(baseName, "ssh_host_") && strings.Contains(baseName, "key") {
+		return true, "SSH host key"
+	}
+
+	extensions := map[string]string{
+		".pem":      "certificate/key file",
+		".p12":      "certificate file",
+		".key":      "key file",
+		".pfx":      "certificate file",
+		".pkcs12":   "certificate file",
+		".keystore": "Java keystore file",
+		".jks":      "Java keystore file",
+	}
+
+	if reason, exists := extensions[filepath.Ext(baseName)]; exists {
+		return true, reason
+	}
+
+	if baseName == ".git-credentials" {
+		return true, "Git credentials file"
+	}
+
+	return false, ""
+}
+
+func verifyReadTextFileInput(input any, toolUseData *uctypes.UIMessageDataToolUse) error {
+	params, err := parseReadTextFileInput(input)
+	if err != nil {
+		return err
+	}
+
+	expandedPath, err := wavebase.ExpandHomeDir(params.Filename)
+	if err != nil {
+		return fmt.Errorf("failed to expand path: %w", err)
+	}
+
+	if !filepath.IsAbs(expandedPath) {
+		return fmt.Errorf("path must be absolute, got relative path: %s", params.Filename)
+	}
+
+	if blocked, reason := isBlockedFile(expandedPath); blocked {
+		return fmt.Errorf("access denied: potentially sensitive file: %s", reason)
+	}
+
+	fileInfo, err := os.Stat(expandedPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	if fileInfo.IsDir() {
+		return fmt.Errorf("path is a directory, cannot be read with the read_text_file tool. use the read_dir tool if available to read directories")
+	}
+
+	return nil
+}
+
+func readTextFileCallback(input any, toolUseData *uctypes.UIMessageDataToolUse) (any, error) {
 	const ReadLimit = 1024 * 1024 * 1024
 
 	params, err := parseReadTextFileInput(input)
@@ -113,6 +239,14 @@ func readTextFileCallback(input any) (any, error) {
 	expandedPath, err := wavebase.ExpandHomeDir(params.Filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to expand path: %w", err)
+	}
+
+	if !filepath.IsAbs(expandedPath) {
+		return nil, fmt.Errorf("path must be absolute, got relative path: %s", params.Filename)
+	}
+
+	if blocked, reason := isBlockedFile(expandedPath); blocked {
+		return nil, fmt.Errorf("access denied: potentially sensitive file: %s", reason)
 	}
 
 	fileInfo, err := os.Stat(expandedPath)
@@ -183,7 +317,7 @@ func readTextFileCallback(input any) (any, error) {
 		"modified_time": modTime.UTC().Format(time.RFC3339),
 		"mode":          fileInfo.Mode().String(),
 	}
-	if stopReason != "" {
+	if stopReason == "read_limit" || stopReason == StopReasonMaxBytes {
 		result["truncated"] = stopReason
 	}
 
@@ -202,7 +336,7 @@ func GetReadTextFileToolDefinition() uctypes.ToolDefinition {
 			"properties": map[string]any{
 				"filename": map[string]any{
 					"type":        "string",
-					"description": "Path to the file to read. Supports '~' for the user's home directory.",
+					"description": "Absolute path to the file to read. Supports '~' for the user's home directory. Relative paths are not supported.",
 				},
 				"origin": map[string]any{
 					"type":        "string",
@@ -219,20 +353,20 @@ func GetReadTextFileToolDefinition() uctypes.ToolDefinition {
 				"count": map[string]any{
 					"type":        "integer",
 					"minimum":     1,
-					"default":     100,
+					"default":     ReadFileDefaultLineCount,
 					"description": "Number of lines to return",
 				},
 				"max_bytes": map[string]any{
 					"type":        "integer",
 					"minimum":     1,
-					"default":     51200,
+					"default":     ReadFileDefaultMaxBytes,
 					"description": "Maximum bytes to return. If the result exceeds this, it will be truncated at line boundaries",
 				},
 			},
 			"required":             []string{"filename"},
 			"additionalProperties": false,
 		},
-		ToolInputDesc: func(input any) string {
+		ToolCallDesc: func(input any, output any, toolUseData *uctypes.UIMessageDataToolUse) string {
 			parsed, err := parseReadTextFileInput(input)
 			if err != nil {
 				return fmt.Sprintf("error parsing input: %v", err)
@@ -242,10 +376,24 @@ func GetReadTextFileToolDefinition() uctypes.ToolDefinition {
 			offset := *parsed.Offset
 			count := *parsed.Count
 
+			readFullFile := false
+			if output != nil {
+				if outputMap, ok := output.(map[string]any); ok {
+					_, wasTruncated := outputMap["truncated"]
+					readFullFile = !wasTruncated
+				}
+			}
+
 			if origin == "start" && offset == 0 {
+				if readFullFile {
+					return fmt.Sprintf("reading %q (entire file)", parsed.Filename)
+				}
 				return fmt.Sprintf("reading %q (first %d lines)", parsed.Filename, count)
 			}
 			if origin == "end" && offset == 0 {
+				if readFullFile {
+					return fmt.Sprintf("reading %q (entire file)", parsed.Filename)
+				}
 				return fmt.Sprintf("reading %q (last %d lines)", parsed.Filename, count)
 			}
 			if origin == "end" {
@@ -257,5 +405,6 @@ func GetReadTextFileToolDefinition() uctypes.ToolDefinition {
 		ToolApproval: func(input any) string {
 			return uctypes.ApprovalNeedsApproval
 		},
+		ToolVerifyInput: verifyReadTextFileInput,
 	}
 }

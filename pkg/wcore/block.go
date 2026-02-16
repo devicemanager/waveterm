@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/wavetermdev/waveterm/pkg/blockcontroller"
 	"github.com/wavetermdev/waveterm/pkg/filestore"
 	"github.com/wavetermdev/waveterm/pkg/panichandler"
 	"github.com/wavetermdev/waveterm/pkg/telemetry"
@@ -100,12 +99,13 @@ func CreateBlockWithTelemetry(ctx context.Context, tabId string, blockDef *waveo
 	}
 	if recordTelemetry {
 		blockView := blockDef.Meta.GetString(waveobj.MetaKey_View, "")
-		go recordBlockCreationTelemetry(blockView)
+		blockController := blockDef.Meta.GetString(waveobj.MetaKey_Controller, "")
+		go recordBlockCreationTelemetry(blockView, blockController)
 	}
 	return blockData, nil
 }
 
-func recordBlockCreationTelemetry(blockView string) {
+func recordBlockCreationTelemetry(blockView string, blockController string) {
 	defer func() {
 		panichandler.PanicHandler("CreateBlock:telemetry", recover())
 	}()
@@ -120,7 +120,8 @@ func recordBlockCreationTelemetry(blockView string) {
 	telemetry.RecordTEvent(tctx, &telemetrydata.TEvent{
 		Event: "action:createblock",
 		Props: telemetrydata.TEventProps{
-			BlockView: blockView,
+			BlockView:       blockView,
+			BlockController: blockController,
 		},
 	})
 }
@@ -150,7 +151,7 @@ func createBlockObj(ctx context.Context, tabId string, blockDef *waveobj.BlockDe
 // recursive: if true, will recursively close parent tab, window, workspace, if they are empty.
 // Returns new active tab id, error.
 func DeleteBlock(ctx context.Context, blockId string, recursive bool) error {
-	block, err := wstore.DBMustGet[*waveobj.Block](ctx, blockId)
+	block, err := wstore.DBGet[*waveobj.Block](ctx, blockId)
 	if err != nil {
 		return fmt.Errorf("error getting block: %w", err)
 	}
@@ -185,7 +186,6 @@ func DeleteBlock(ctx context.Context, blockId string, recursive bool) error {
 		}
 		SendActiveTabUpdate(ctx, parentWorkspaceId, newActiveTabId)
 	}
-	go blockcontroller.StopBlockController(blockId)
 	sendBlockCloseEvent(blockId)
 	return nil
 }
@@ -223,11 +223,11 @@ func deleteBlockObj(ctx context.Context, blockId string) (int, error) {
 			}
 		}
 		wstore.DBDelete(tx.Context(), waveobj.OType_Block, blockId)
-		
+
 		// Clean up block runtime info
 		blockORef := waveobj.MakeORef(waveobj.OType_Block, blockId)
 		wstore.DeleteRTInfo(blockORef)
-		
+
 		return parentBlockCount, nil
 	})
 }

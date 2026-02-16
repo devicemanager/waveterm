@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -17,6 +18,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -25,10 +27,12 @@ import (
 	"github.com/skeema/knownhosts"
 	"github.com/wavetermdev/waveterm/pkg/blocklogger"
 	"github.com/wavetermdev/waveterm/pkg/panichandler"
+	"github.com/wavetermdev/waveterm/pkg/secretstore"
 	"github.com/wavetermdev/waveterm/pkg/trimquotes"
 	"github.com/wavetermdev/waveterm/pkg/userinput"
 	"github.com/wavetermdev/waveterm/pkg/util/shellutil"
 	"github.com/wavetermdev/waveterm/pkg/util/utilfn"
+	"github.com/wavetermdev/waveterm/pkg/utilds"
 	"github.com/wavetermdev/waveterm/pkg/wavebase"
 	"github.com/wavetermdev/waveterm/pkg/wconfig"
 	"golang.org/x/crypto/ssh"
@@ -37,6 +41,25 @@ import (
 )
 
 const SshProxyJumpMaxDepth = 10
+
+const (
+	ConnErrCode_ConfigParse    = "config-parse"
+	ConnErrCode_ConfigDefault  = "config-default"
+	ConnErrCode_ProxyDepth     = "proxy-depth"
+	ConnErrCode_ProxyParse     = "proxy-parse"
+	ConnErrCode_SecretStore    = "secret-error"
+	ConnErrCode_SecretNotFound = "secret-notfound"
+	ConnErrCode_KnownHostsNone = "knownhosts-none"
+	ConnErrCode_KnownHostsFmt  = "knownhosts-format"
+	ConnErrCode_Dial           = "dial-error"
+	ConnErrCode_HostKeyRevoked = "hostkey-revoked"
+	ConnErrCode_HostKeyChanged = "hostkey-changed"
+	ConnErrCode_HostKeyVerify  = "hostkey-verify"
+	ConnErrCode_UserCancelled  = "user-cancelled"
+	ConnErrCode_UserTimeout    = "user-timeout"
+	ConnErrCode_AuthFailed     = "auth-failed"
+	ConnErrCode_Unknown        = "unknown"
+)
 
 var waveSshConfigUserSettingsInternal *ssh_config.UserSettings
 var configUserSettingsOnce = &sync.Once{}
@@ -59,6 +82,10 @@ func (uice UserInputCancelError) Error() string {
 	return uice.Err.Error()
 }
 
+func (uice UserInputCancelError) Unwrap() error {
+	return uice.Err
+}
+
 type ConnectionDebugInfo struct {
 	CurrentClient *ssh.Client
 	NextOpts      *SSHOpts
@@ -77,6 +104,10 @@ func (ce ConnectionError) Error() string {
 	return fmt.Sprintf("Connecting from %v to %s (jump number %d), Error: %v", ce.CurrentClient, ce.NextOpts, ce.JumpNum, ce.Err)
 }
 
+func (ce ConnectionError) Unwrap() error {
+	return ce.Err
+}
+
 func SimpleMessageFromPossibleConnectionError(err error) string {
 	if err == nil {
 		return ""
@@ -85,6 +116,35 @@ func SimpleMessageFromPossibleConnectionError(err error) string {
 		return ce.Err.Error()
 	}
 	return err.Error()
+}
+
+func ClassifyConnError(err error) string {
+	code := utilds.GetErrorCode(err)
+	if code != "" {
+		return code
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return ConnErrCode_Dial
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return ConnErrCode_Dial
+	}
+	errStr := err.Error()
+	if strings.Contains(errStr, "unable to authenticate") {
+		return ConnErrCode_AuthFailed
+	}
+	if strings.Contains(errStr, "handshake failed") {
+		return ConnErrCode_AuthFailed
+	}
+	if strings.Contains(errStr, "connection refused") {
+		return ConnErrCode_Dial
+	}
+	if strings.Contains(errStr, "timed out") || strings.Contains(errStr, "timeout") {
+		return ConnErrCode_Dial
+	}
+	return ConnErrCode_Unknown
 }
 
 // This exists to trick the ssh library into continuing to try
@@ -202,7 +262,7 @@ func createPublicKeyCallback(connCtx context.Context, sshKeywords *wconfig.ConnK
 			// this is an error where we actually do want to stop
 			// trying keys
 
-			return nil, ConnectionError{ConnectionDebugInfo: debugInfo, Err: UserInputCancelError{Err: err}}
+			return nil, ConnectionError{ConnectionDebugInfo: debugInfo, Err: utilds.MakeCodedError(ConnErrCode_UserCancelled, UserInputCancelError{Err: err})}
 		}
 		unencryptedPrivateKey, err = ssh.ParseRawPrivateKeyWithPassphrase(privateKey, []byte([]byte(response.Text)))
 		if err != nil {
@@ -223,7 +283,7 @@ func createPublicKeyCallback(connCtx context.Context, sshKeywords *wconfig.ConnK
 	}
 }
 
-func createInteractivePasswordCallbackPrompt(connCtx context.Context, remoteDisplayName string, debugInfo *ConnectionDebugInfo) func() (secret string, err error) {
+func createPasswordCallbackPrompt(connCtx context.Context, remoteDisplayName string, password *string, debugInfo *ConnectionDebugInfo) func() (secret string, err error) {
 	return func() (secret string, outErr error) {
 		defer func() {
 			panicErr := panichandler.PanicHandler("sshclient:password-callback", recover())
@@ -232,6 +292,12 @@ func createInteractivePasswordCallbackPrompt(connCtx context.Context, remoteDisp
 			}
 		}()
 		blocklogger.Infof(connCtx, "[conndebug] Password Authentication requested from connection %s...\n", remoteDisplayName)
+
+		if password != nil {
+			blocklogger.Infof(connCtx, "[conndebug] using password from secret store, sending to ssh\n")
+			return *password, nil
+		}
+
 		ctx, cancelFn := context.WithTimeout(connCtx, 60*time.Second)
 		defer cancelFn()
 		queryText := fmt.Sprintf(
@@ -269,7 +335,7 @@ func createInteractiveKbdInteractiveChallenge(connCtx context.Context, remoteNam
 			echo := echos[i]
 			answer, err := promptChallengeQuestion(connCtx, question, echo, remoteName)
 			if err != nil {
-				return nil, ConnectionError{ConnectionDebugInfo: debugInfo, Err: err}
+				return nil, ConnectionError{ConnectionDebugInfo: debugInfo, Err: utilds.MakeCodedError(ConnErrCode_UserCancelled, err)}
 			}
 			answers = append(answers, answer)
 		}
@@ -425,7 +491,7 @@ func createHostKeyCallback(ctx context.Context, sshKeywords *wconfig.ConnKeyword
 
 	osUser, err := user.Current()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, utilds.MakeCodedError(ConnErrCode_ConfigParse, err)
 	}
 	var unexpandedKnownHostsFiles []string
 	if osUser.Username == "root" {
@@ -445,7 +511,7 @@ func createHostKeyCallback(ctx context.Context, sshKeywords *wconfig.ConnKeyword
 
 	// there are no good known hosts files
 	if len(knownHostsFiles) == 0 {
-		return nil, nil, fmt.Errorf("no known_hosts files provided by ssh. defaults are overridden")
+		return nil, nil, utilds.Errorf(ConnErrCode_KnownHostsNone, "no known_hosts files provided by ssh. defaults are overridden")
 	}
 
 	var unreadableFiles []string
@@ -467,12 +533,11 @@ func createHostKeyCallback(ctx context.Context, sshKeywords *wconfig.ConnKeyword
 				}
 			}
 			if len(okFiles) >= len(knownHostsFiles) {
-				return nil, nil, fmt.Errorf("problem file (%s) doesn't exist. this should not be possible", badFile)
+				return nil, nil, utilds.Errorf(ConnErrCode_KnownHostsFmt, "problem file (%s) doesn't exist. this should not be possible", badFile)
 			}
 			knownHostsFiles = okFiles
 		} else if err != nil {
-			// TODO handle obscure problems if possible
-			return nil, nil, fmt.Errorf("known_hosts formatting error: %+v", err)
+			return nil, nil, utilds.Errorf(ConnErrCode_KnownHostsFmt, "known_hosts formatting error: %w", err)
 		} else {
 			basicCallback = keyDb.HostKeyCallback()
 			hostKeyAlgorithms = keyDb.HostKeyAlgorithms
@@ -502,8 +567,7 @@ func createHostKeyCallback(ctx context.Context, sshKeywords *wconfig.ConnKeyword
 			// success
 			return nil
 		} else if _, ok := err.(*xknownhosts.RevokedError); ok {
-			// revoked credentials are refused outright
-			return err
+			return utilds.MakeCodedError(ConnErrCode_HostKeyRevoked, err)
 		} else if _, ok := err.(*xknownhosts.KeyError); !ok {
 			// this is an unknown error (note the !ok is opposite of usual)
 			return err
@@ -522,7 +586,7 @@ func createHostKeyCallback(ctx context.Context, sshKeywords *wconfig.ConnKeyword
 					break
 				}
 				if serr, ok := err.(UserInputCancelError); ok {
-					return serr
+					return utilds.MakeCodedError(ConnErrCode_UserCancelled, serr)
 				}
 			}
 
@@ -538,12 +602,12 @@ func createHostKeyCallback(ctx context.Context, sshKeywords *wconfig.ConnKeyword
 						break
 					}
 					if serr, ok := err.(UserInputCancelError); ok {
-						return serr
+						return utilds.MakeCodedError(ConnErrCode_UserCancelled, serr)
 					}
 				}
 			}
 			if err != nil {
-				return fmt.Errorf("unable to create new knownhost key: %e", err)
+				return utilds.Errorf(ConnErrCode_HostKeyVerify, "unable to create new knownhost key: %w", err)
 			}
 		} else {
 			// the key changed
@@ -577,7 +641,7 @@ func createHostKeyCallback(ctx context.Context, sshKeywords *wconfig.ConnKeyword
 			// create update into alert message
 
 			//send update via bus?
-			return fmt.Errorf("remote host identification has changed")
+			return utilds.Errorf(ConnErrCode_HostKeyChanged, "remote host identification has changed")
 		}
 
 		updatedCallback, err := xknownhosts.New(knownHostsFiles...)
@@ -605,19 +669,34 @@ func createClientConfig(connCtx context.Context, sshKeywords *wconfig.ConnKeywor
 
 	// IdentitiesOnly indicates that only the keys listed in the identity and certificate files or passed as arguments should be used, even if there are matches in the SSH Agent, PKCS11Provider, or SecurityKeyProvider. See https://man.openbsd.org/ssh_config#IdentitiesOnly
 	// TODO: Update if we decide to support PKCS11Provider and SecurityKeyProvider
-	if !utilfn.SafeDeref(sshKeywords.SshIdentitiesOnly) {
-		conn, err := net.Dial("unix", utilfn.SafeDeref(sshKeywords.SshIdentityAgent))
+	agentPath := strings.TrimSpace(utilfn.SafeDeref(sshKeywords.SshIdentityAgent))
+	if !utilfn.SafeDeref(sshKeywords.SshIdentitiesOnly) && agentPath != "" {
+		conn, err := dialIdentityAgent(agentPath)
 		if err != nil {
-			log.Printf("Failed to open Identity Agent Socket: %v", err)
+			log.Printf("Failed to open Identity Agent Socket %q: %v", agentPath, err)
 		} else {
 			agentClient = agent.NewClient(conn)
 			authSockSigners, _ = agentClient.Signers()
 		}
 	}
 
+	var sshPassword *string
+	if sshKeywords.SshPasswordSecretName != nil && *sshKeywords.SshPasswordSecretName != "" {
+		secretName := *sshKeywords.SshPasswordSecretName
+		password, exists, err := secretstore.GetSecret(secretName)
+		if err != nil {
+			return nil, utilds.Errorf(ConnErrCode_SecretStore, "error retrieving ssh:passwordsecretname %q: %w", secretName, err)
+		}
+		if !exists {
+			return nil, utilds.Errorf(ConnErrCode_SecretNotFound, "ssh:passwordsecretname %q not found in secret store", secretName)
+		}
+		blocklogger.Infof(connCtx, "[conndebug] successfully retrieved ssh:passwordsecretname %q from secret store\n", secretName)
+		sshPassword = &password
+	}
+
 	publicKeyCallback := ssh.PublicKeysCallback(createPublicKeyCallback(connCtx, sshKeywords, authSockSigners, agentClient, debugInfo))
 	keyboardInteractive := ssh.KeyboardInteractive(createInteractiveKbdInteractiveChallenge(connCtx, remoteName, debugInfo))
-	passwordCallback := ssh.PasswordCallback(createInteractivePasswordCallbackPrompt(connCtx, remoteName, debugInfo))
+	passwordCallback := ssh.PasswordCallback(createPasswordCallbackPrompt(connCtx, remoteName, sshPassword, debugInfo))
 
 	// exclude gssapi-with-mic and hostbased until implemented
 	authMethodMap := map[string]ssh.AuthMethod{
@@ -669,14 +748,14 @@ func connectInternal(ctx context.Context, networkAddr string, clientConfig *ssh.
 		clientConn, err = d.DialContext(ctx, "tcp", networkAddr)
 		if err != nil {
 			blocklogger.Infof(ctx, "[conndebug] ERROR dial error: %v\n", err)
-			return nil, err
+			return nil, utilds.MakeCodedError(ConnErrCode_Dial, err)
 		}
 	} else {
 		blocklogger.Infof(ctx, "[conndebug] ssh dial (from client) %s\n", networkAddr)
 		clientConn, err = currentClient.DialContext(ctx, "tcp", networkAddr)
 		if err != nil {
 			blocklogger.Infof(ctx, "[conndebug] ERROR dial error: %v\n", err)
-			return nil, err
+			return nil, utilds.MakeCodedError(ConnErrCode_Dial, err)
 		}
 	}
 	c, chans, reqs, err := ssh.NewClientConn(clientConn, networkAddr, clientConfig)
@@ -696,7 +775,7 @@ func ConnectToClient(connCtx context.Context, opts *SSHOpts, currentClient *ssh.
 		JumpNum:       jumpNum,
 	}
 	if jumpNum > SshProxyJumpMaxDepth {
-		return nil, jumpNum, ConnectionError{ConnectionDebugInfo: debugInfo, Err: fmt.Errorf("ProxyJump %d exceeds Wave's max depth of %d", jumpNum, SshProxyJumpMaxDepth)}
+		return nil, jumpNum, ConnectionError{ConnectionDebugInfo: debugInfo, Err: utilds.Errorf(ConnErrCode_ProxyDepth, "ProxyJump %d exceeds Wave's max depth of %d", jumpNum, SshProxyJumpMaxDepth)}
 	}
 
 	rawName := opts.String()
@@ -711,14 +790,14 @@ func ConnectToClient(connCtx context.Context, opts *SSHOpts, currentClient *ssh.
 		var err error
 		sshConfigKeywords, err = findSshDefaults(opts.SSHHost)
 		if err != nil {
-			err = fmt.Errorf("cannot determine default config keywords: %w", err)
+			err = utilds.MakeCodedError(ConnErrCode_ConfigDefault, fmt.Errorf("cannot determine default config keywords: %w", err))
 			return nil, debugInfo.JumpNum, ConnectionError{ConnectionDebugInfo: debugInfo, Err: err}
 		}
 	} else {
 		var err error
 		sshConfigKeywords, err = findSshConfigKeywords(opts.SSHHost)
 		if err != nil {
-			err = fmt.Errorf("cannot determine config keywords: %w", err)
+			err = utilds.MakeCodedError(ConnErrCode_ConfigParse, fmt.Errorf("cannot determine config keywords: %w", err))
 			return nil, debugInfo.JumpNum, ConnectionError{ConnectionDebugInfo: debugInfo, Err: err}
 		}
 	}
@@ -750,7 +829,7 @@ func ConnectToClient(connCtx context.Context, opts *SSHOpts, currentClient *ssh.
 	for _, proxyName := range sshKeywords.SshProxyJump {
 		proxyOpts, err := ParseOpts(proxyName)
 		if err != nil {
-			return nil, debugInfo.JumpNum, ConnectionError{ConnectionDebugInfo: debugInfo, Err: err}
+			return nil, debugInfo.JumpNum, ConnectionError{ConnectionDebugInfo: debugInfo, Err: utilds.MakeCodedError(ConnErrCode_ProxyParse, err)}
 		}
 
 		// ensure no overflow (this will likely never happen)
@@ -879,17 +958,26 @@ func findSshConfigKeywords(hostPattern string) (connKeywords *wconfig.ConnKeywor
 		return nil, err
 	}
 	if identityAgentRaw == "" {
-		shellPath := shellutil.DetectLocalShellPath()
-		authSockCommand := exec.Command(shellPath, "-c", "echo ${SSH_AUTH_SOCK}")
-		sshAuthSock, err := authSockCommand.Output()
-		if err == nil {
-			agentPath, err := wavebase.ExpandHomeDir(trimquotes.TryTrimQuotes(strings.TrimSpace(string(sshAuthSock))))
-			if err != nil {
-				return nil, err
-			}
-			sshKeywords.SshIdentityAgent = utilfn.Ptr(agentPath)
+		if runtime.GOOS == "windows" {
+			sshKeywords.SshIdentityAgent = utilfn.Ptr(`\\.\pipe\openssh-ssh-agent`)
 		} else {
-			log.Printf("unable to find SSH_AUTH_SOCK: %v\n", err)
+			shellPath := shellutil.DetectLocalShellPath()
+			authSockCommand := exec.Command(shellPath, "-c", "echo ${SSH_AUTH_SOCK}")
+			sshAuthSock, err := authSockCommand.Output()
+			if err == nil {
+				trimmedSock := strings.TrimSpace(string(sshAuthSock))
+				if trimmedSock == "" {
+					log.Printf("SSH_AUTH_SOCK is empty in shell environment")
+				} else {
+					agentPath, err := wavebase.ExpandHomeDir(trimquotes.TryTrimQuotes(trimmedSock))
+					if err != nil {
+						return nil, err
+					}
+					sshKeywords.SshIdentityAgent = utilfn.Ptr(agentPath)
+				}
+			} else {
+				log.Printf("unable to find SSH_AUTH_SOCK: %v\n", err)
+			}
 		}
 	} else {
 		agentPath, err := wavebase.ExpandHomeDir(trimquotes.TryTrimQuotes(identityAgentRaw))
@@ -1013,6 +1101,9 @@ func mergeKeywords(oldKeywords *wconfig.ConnKeywords, newKeywords *wconfig.ConnK
 	}
 	if newKeywords.SshGlobalKnownHostsFile != nil {
 		outKeywords.SshGlobalKnownHostsFile = newKeywords.SshGlobalKnownHostsFile
+	}
+	if newKeywords.SshPasswordSecretName != nil {
+		outKeywords.SshPasswordSecretName = newKeywords.SshPasswordSecretName
 	}
 
 	return &outKeywords

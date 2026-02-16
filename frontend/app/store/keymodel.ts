@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { WaveAIModel } from "@/app/aipanel/waveai-model";
-import { focusManager } from "@/app/store/focusManager";
+import { FocusManager } from "@/app/store/focusManager";
 import {
     atoms,
     createBlock,
@@ -15,14 +15,16 @@ import {
     getFocusedBlockId,
     getSettingsKeyAtom,
     globalStore,
+    recordTEvent,
     refocusNode,
     replaceBlock,
     WOS,
 } from "@/app/store/global";
-import { TabBarModel } from "@/app/tab/tabbar-model";
+import { getActiveTabModel } from "@/app/store/tab-model";
 import { WorkspaceLayoutModel } from "@/app/workspace/workspace-layout-model";
 import { deleteLayoutModelForTab, getLayoutModelForStaticTab, NavigateDirection } from "@/layout/index";
 import * as keyutil from "@/util/keyutil";
+import { isWindows } from "@/util/platformutil";
 import { CHORD_TIMEOUT } from "@/util/sharedconst";
 import { fireAndForget } from "@/util/util";
 import * as jotai from "jotai";
@@ -74,12 +76,15 @@ function getSimpleControlShiftAtom() {
 
 function setControlShift() {
     globalStore.set(simpleControlShiftAtom, true);
-    setTimeout(() => {
-        const simpleState = globalStore.get(simpleControlShiftAtom);
-        if (simpleState) {
-            globalStore.set(atoms.controlShiftDelayAtom, true);
-        }
-    }, 400);
+    const disableDisplay = globalStore.get(getSettingsKeyAtom("app:disablectrlshiftdisplay"));
+    if (!disableDisplay) {
+        setTimeout(() => {
+            const simpleState = globalStore.get(simpleControlShiftAtom);
+            if (simpleState) {
+                globalStore.set(atoms.controlShiftDelayAtom, true);
+            }
+        }, 400);
+    }
 }
 
 function unsetControlShift() {
@@ -122,12 +127,6 @@ function getStaticTabBlockCount(): number {
     return tabData?.blockids?.length ?? 0;
 }
 
-function isStaticTabPinned(): boolean {
-    const ws = globalStore.get(atoms.workspace);
-    const tabId = globalStore.get(atoms.staticTabId);
-    return ws.pinnedtabids?.includes(tabId) ?? false;
-}
-
 function simpleCloseStaticTab() {
     const ws = globalStore.get(atoms.workspace);
     const tabId = globalStore.get(atoms.staticTabId);
@@ -136,37 +135,37 @@ function simpleCloseStaticTab() {
 }
 
 function uxCloseBlock(blockId: string) {
-    if (isStaticTabPinned() && getStaticTabBlockCount() === 1) {
-        TabBarModel.getInstance().jiggleActivePinnedTab();
-        return;
-    }
-
     const workspaceLayoutModel = WorkspaceLayoutModel.getInstance();
     const isAIPanelOpen = workspaceLayoutModel.getAIPanelVisible();
     if (isAIPanelOpen && getStaticTabBlockCount() === 1) {
         const aiModel = WaveAIModel.getInstance();
-        const shouldSwitchToAI = !aiModel.isChatEmpty || aiModel.hasNonEmptyInput();
+        const shouldSwitchToAI = !globalStore.get(aiModel.isChatEmptyAtom) || aiModel.hasNonEmptyInput();
         if (shouldSwitchToAI) {
             replaceBlock(blockId, { meta: { view: "launcher" } }, false);
             setTimeout(() => WaveAIModel.getInstance().focusInput(), 50);
             return;
         }
     }
+
+    const blockAtom = WOS.getWaveObjectAtom<Block>(WOS.makeORef("block", blockId));
+    const blockData = globalStore.get(blockAtom);
+    const isAIFileDiff = blockData?.meta?.view === "aifilediff";
+
     const layoutModel = getLayoutModelForStaticTab();
     const node = layoutModel.getNodeByBlockId(blockId);
     if (node) {
         fireAndForget(() => layoutModel.closeNode(node.id));
+
+        if (isAIFileDiff && isAIPanelOpen) {
+            setTimeout(() => WaveAIModel.getInstance().focusInput(), 50);
+        }
     }
 }
 
 function genericClose() {
-    const focusType = focusManager.getFocusType();
+    const focusType = FocusManager.getInstance().getFocusType();
     if (focusType === "waveai") {
         WorkspaceLayoutModel.getInstance().setAIPanelVisible(false);
-        return;
-    }
-    if (isStaticTabPinned() && getStaticTabBlockCount() === 1) {
-        TabBarModel.getInstance().jiggleActivePinnedTab();
         return;
     }
 
@@ -174,7 +173,7 @@ function genericClose() {
     const isAIPanelOpen = workspaceLayoutModel.getAIPanelVisible();
     if (isAIPanelOpen && getStaticTabBlockCount() === 1) {
         const aiModel = WaveAIModel.getInstance();
-        const shouldSwitchToAI = !aiModel.isChatEmpty || aiModel.hasNonEmptyInput();
+        const shouldSwitchToAI = !globalStore.get(aiModel.isChatEmptyAtom) || aiModel.hasNonEmptyInput();
         if (shouldSwitchToAI) {
             const layoutModel = getLayoutModelForStaticTab();
             const focusedNode = globalStore.get(layoutModel.focusedNode);
@@ -190,8 +189,19 @@ function genericClose() {
         simpleCloseStaticTab();
         return;
     }
+
     const layoutModel = getLayoutModelForStaticTab();
+    const focusedNode = globalStore.get(layoutModel.focusedNode);
+    const blockId = focusedNode?.data?.blockId;
+    const blockAtom = blockId ? WOS.getWaveObjectAtom<Block>(WOS.makeORef("block", blockId)) : null;
+    const blockData = blockAtom ? globalStore.get(blockAtom) : null;
+    const isAIFileDiff = blockData?.meta?.view === "aifilediff";
+
     fireAndForget(layoutModel.closeFocusedNode.bind(layoutModel));
+
+    if (isAIFileDiff && isAIPanelOpen) {
+        setTimeout(() => WaveAIModel.getInstance().focusInput(), 50);
+    }
 }
 
 function switchBlockByBlockNum(index: number) {
@@ -207,7 +217,7 @@ function switchBlockByBlockNum(index: number) {
 
 function switchBlockInDirection(direction: NavigateDirection) {
     const layoutModel = getLayoutModelForStaticTab();
-    const focusType = focusManager.getFocusType();
+    const focusType = FocusManager.getInstance().getFocusType();
 
     if (direction === NavigateDirection.Left) {
         const numBlocks = globalStore.get(layoutModel.numLeafs);
@@ -215,20 +225,26 @@ function switchBlockInDirection(direction: NavigateDirection) {
             return;
         }
         if (numBlocks === 1) {
-            focusManager.requestWaveAIFocus();
+            FocusManager.getInstance().requestWaveAIFocus();
+            setTimeout(() => {
+                FocusManager.getInstance().refocusNode();
+            }, 10);
             return;
         }
     }
 
     if (direction === NavigateDirection.Right && focusType === "waveai") {
-        focusManager.requestNodeFocus();
+        FocusManager.getInstance().requestNodeFocus();
         return;
     }
 
     const inWaveAI = focusType === "waveai";
     const navResult = layoutModel.switchNodeFocusInDirection(direction, inWaveAI);
     if (navResult.atLeft) {
-        focusManager.requestWaveAIFocus();
+        FocusManager.getInstance().requestWaveAIFocus();
+        setTimeout(() => {
+            FocusManager.getInstance().refocusNode();
+        }, 10);
         return;
     }
     setTimeout(() => {
@@ -237,7 +253,7 @@ function switchBlockInDirection(direction: NavigateDirection) {
 }
 
 function getAllTabs(ws: Workspace): string[] {
-    return [...(ws.pinnedtabids ?? []), ...(ws.tabids ?? [])];
+    return ws.tabids ?? [];
 }
 
 function switchTabAbs(index: number) {
@@ -283,6 +299,10 @@ function globalRefocusWithTimeout(timeoutVal: number) {
 }
 
 function globalRefocus() {
+    if (globalStore.get(atoms.waveWindowType) == "builder") {
+        return;
+    }
+
     const layoutModel = getLayoutModelForStaticTab();
     const focusedNode = globalStore.get(layoutModel.focusedNode);
     if (focusedNode == null) {
@@ -406,16 +426,18 @@ function appHandleKeyDown(waveEvent: WaveKeyboardEvent): boolean {
             return true;
         }
     }
-    const layoutModel = getLayoutModelForStaticTab();
-    const focusedNode = globalStore.get(layoutModel.focusedNode);
-    const blockId = focusedNode?.data?.blockId;
-    if (blockId != null && shouldDispatchToBlock(waveEvent)) {
-        const bcm = getBlockComponentModel(blockId);
-        const viewModel = bcm?.viewModel;
-        if (viewModel?.keyDownHandler) {
-            const handledByBlock = viewModel.keyDownHandler(waveEvent);
-            if (handledByBlock) {
-                return true;
+    if (globalStore.get(atoms.waveWindowType) == "tab") {
+        const layoutModel = getLayoutModelForStaticTab();
+        const focusedNode = globalStore.get(layoutModel.focusedNode);
+        const blockId = focusedNode?.data?.blockId;
+        if (blockId != null && shouldDispatchToBlock(waveEvent)) {
+            const bcm = getBlockComponentModel(blockId);
+            const viewModel = bcm?.viewModel;
+            if (viewModel?.keyDownHandler) {
+                const handledByBlock = viewModel.keyDownHandler(waveEvent);
+                if (handledByBlock) {
+                    return true;
+                }
             }
         }
     }
@@ -497,10 +519,6 @@ function registerGlobalKeys() {
         return true;
     });
     globalKeyMap.set("Cmd:Shift:w", () => {
-        if (isStaticTabPinned()) {
-            TabBarModel.getInstance().jiggleActivePinnedTab();
-            return true;
-        }
         simpleCloseStaticTab();
         return true;
     });
@@ -513,18 +531,34 @@ function registerGlobalKeys() {
         return true;
     });
     globalKeyMap.set("Ctrl:Shift:ArrowUp", () => {
+        const disableCtrlShiftArrows = globalStore.get(getSettingsKeyAtom("app:disablectrlshiftarrows"));
+        if (disableCtrlShiftArrows) {
+            return false;
+        }
         switchBlockInDirection(NavigateDirection.Up);
         return true;
     });
     globalKeyMap.set("Ctrl:Shift:ArrowDown", () => {
+        const disableCtrlShiftArrows = globalStore.get(getSettingsKeyAtom("app:disablectrlshiftarrows"));
+        if (disableCtrlShiftArrows) {
+            return false;
+        }
         switchBlockInDirection(NavigateDirection.Down);
         return true;
     });
     globalKeyMap.set("Ctrl:Shift:ArrowLeft", () => {
+        const disableCtrlShiftArrows = globalStore.get(getSettingsKeyAtom("app:disablectrlshiftarrows"));
+        if (disableCtrlShiftArrows) {
+            return false;
+        }
         switchBlockInDirection(NavigateDirection.Left);
         return true;
     });
     globalKeyMap.set("Ctrl:Shift:ArrowRight", () => {
+        const disableCtrlShiftArrows = globalStore.get(getSettingsKeyAtom("app:disablectrlshiftarrows"));
+        if (disableCtrlShiftArrows) {
+            return false;
+        }
         switchBlockInDirection(NavigateDirection.Right);
         return true;
     });
@@ -547,17 +581,22 @@ function registerGlobalKeys() {
     globalKeyMap.set("Cmd:g", () => {
         const bcm = getBlockComponentModel(getFocusedBlockInStaticTab());
         if (bcm.openSwitchConnection != null) {
+            recordTEvent("action:other", { "action:type": "conndropdown", "action:initiator": "keyboard" });
             bcm.openSwitchConnection();
             return true;
         }
     });
     globalKeyMap.set("Ctrl:Shift:i", () => {
-        const curMI = globalStore.get(atoms.isTermMultiInput);
+        const tabModel = getActiveTabModel();
+        if (tabModel == null) {
+            return true;
+        }
+        const curMI = globalStore.get(tabModel.isTermMultiInput);
         if (!curMI && countTermBlocks() <= 1) {
             // don't turn on multi-input unless there are 2 or more basic term blocks
             return true;
         }
-        globalStore.set(atoms.isTermMultiInput, !curMI);
+        globalStore.set(tabModel.isTermMultiInput, !curMI);
         return true;
     });
     for (let idx = 1; idx <= 9; idx++) {
@@ -574,14 +613,25 @@ function registerGlobalKeys() {
             return true;
         });
     }
-    globalKeyMap.set("Ctrl:Shift:c{Digit0}", () => {
-        WaveAIModel.getInstance().focusInput();
-        return true;
-    });
-    globalKeyMap.set("Ctrl:Shift:c{Numpad0}", () => {
-        WaveAIModel.getInstance().focusInput();
-        return true;
-    });
+    if (isWindows()) {
+        globalKeyMap.set("Alt:c{Digit0}", () => {
+            WaveAIModel.getInstance().focusInput();
+            return true;
+        });
+        globalKeyMap.set("Alt:c{Numpad0}", () => {
+            WaveAIModel.getInstance().focusInput();
+            return true;
+        });
+    } else {
+        globalKeyMap.set("Ctrl:Shift:c{Digit0}", () => {
+            WaveAIModel.getInstance().focusInput();
+            return true;
+        });
+        globalKeyMap.set("Ctrl:Shift:c{Numpad0}", () => {
+            WaveAIModel.getInstance().focusInput();
+            return true;
+        });
+    }
     function activateSearch(event: WaveKeyboardEvent): boolean {
         const bcm = getBlockComponentModel(getFocusedBlockInStaticTab());
         // Ctrl+f is reserved in most shells
@@ -643,6 +693,15 @@ function registerGlobalKeys() {
     globalChordMap.set("Ctrl:Shift:s", splitBlockKeys);
 }
 
+function registerBuilderGlobalKeys() {
+    globalKeyMap.set("Cmd:w", () => {
+        getApi().closeBuilderWindow();
+        return true;
+    });
+    const allKeys = Array.from(globalKeyMap.keys());
+    getApi().registerGlobalWebviewKeys(allKeys);
+}
+
 function getAllGlobalKeyBindings(): string[] {
     const allKeys = Array.from(globalKeyMap.keys());
     return allKeys;
@@ -655,6 +714,7 @@ export {
     getSimpleControlShiftAtom,
     globalRefocus,
     globalRefocusWithTimeout,
+    registerBuilderGlobalKeys,
     registerControlShiftStateUpdateHandler,
     registerElectronReinjectKeyHandler,
     registerGlobalKeys,

@@ -3,23 +3,22 @@
 
 import Logo from "@/app/asset/logo.svg";
 import { Button } from "@/app/element/button";
-import { Toggle } from "@/app/element/toggle";
 import { FlexiModal } from "@/app/modals/modal";
-import { disableGlobalKeybindings, enableGlobalKeybindings, globalRefocus } from "@/app/store/keymodel";
-import { WorkspaceLayoutModel } from "@/app/workspace/workspace-layout-model";
-import * as services from "@/store/services";
-import { OverlayScrollbarsComponent } from "overlayscrollbars-react";
-import { useEffect, useRef, useState } from "react";
-import { debounce } from "throttle-debounce";
-
 import { OnboardingFeatures } from "@/app/onboarding/onboarding-features";
-import { atoms, globalStore } from "@/app/store/global";
+import { ClientModel } from "@/app/store/client-model";
+import { atoms } from "@/app/store/global";
+import { disableGlobalKeybindings, enableGlobalKeybindings, globalRefocus } from "@/app/store/keymodel";
 import { modalsModel } from "@/app/store/modalmodel";
 import * as WOS from "@/app/store/wos";
 import { RpcApi } from "@/app/store/wshclientapi";
 import { TabRpcClient } from "@/app/store/wshrpcutil";
+import { WorkspaceLayoutModel } from "@/app/workspace/workspace-layout-model";
+import * as services from "@/store/services";
 import { fireAndForget } from "@/util/util";
 import { atom, PrimitiveAtom, useAtom, useAtomValue, useSetAtom } from "jotai";
+import { OverlayScrollbarsComponent } from "overlayscrollbars-react";
+import { useEffect, useRef, useState } from "react";
+import { debounce } from "throttle-debounce";
 
 // Page flow:
 //   init -> (telemetry enabled) -> features
@@ -31,7 +30,7 @@ const pageNameAtom: PrimitiveAtom<PageName> = atom<PageName>("init");
 
 const InitPage = ({ isCompact }: { isCompact: boolean }) => {
     const settings = useAtomValue(atoms.settingsAtom);
-    const clientData = useAtomValue(atoms.client);
+    const clientData = useAtomValue(ClientModel.getInstance().clientAtom);
     const [telemetryEnabled, setTelemetryEnabled] = useState<boolean>(!!settings["telemetry:enabled"]);
     const setPageName = useSetAtom(pageNameAtom);
 
@@ -53,7 +52,7 @@ const InitPage = ({ isCompact }: { isCompact: boolean }) => {
         );
     };
 
-    const label = telemetryEnabled ? "Telemetry Enabled" : "Telemetry Disabled";
+    const label = telemetryEnabled ? "Enabled" : "Disabled";
 
     return (
         <div className="flex flex-col h-full">
@@ -118,13 +117,9 @@ const InitPage = ({ isCompact }: { isCompact: boolean }) => {
                             <i className="text-[32px] text-white/50 fa-solid fa-chart-line"></i>
                         </div>
                         <div className="flex flex-col items-start gap-1 flex-1">
-                            <div className="text-foreground text-base leading-[18px]">Telemetry</div>
                             <div className="text-secondary leading-5">
-                                We collect minimal anonymous{" "}
-                                <a target="_blank" href="https://docs.waveterm.dev/telemetry" rel={"noopener"}>
-                                    telemetry data
-                                </a>{" "}
-                                to help us understand how people are using Wave (
+                                Anonymous usage data helps us improve features you use.
+                                <br />
                                 <a
                                     className="plain-link"
                                     target="_blank"
@@ -133,9 +128,16 @@ const InitPage = ({ isCompact }: { isCompact: boolean }) => {
                                 >
                                     Privacy Policy
                                 </a>
-                                ).
                             </div>
-                            <Toggle checked={telemetryEnabled} onChange={setTelemetry} label={label} />
+                            <label className="flex items-center gap-2 cursor-pointer text-secondary">
+                                <input
+                                    type="checkbox"
+                                    checked={telemetryEnabled}
+                                    onChange={(e) => setTelemetry(e.target.checked)}
+                                    className="cursor-pointer accent-gray-500"
+                                />
+                                <span>{label}</span>
+                            </label>
                         </div>
                     </div>
                 </div>
@@ -155,7 +157,7 @@ const NoTelemetryStarPage = ({ isCompact }: { isCompact: boolean }) => {
     const setPageName = useSetAtom(pageNameAtom);
 
     const handleStarClick = async () => {
-        const clientId = globalStore.get(atoms.clientId);
+        const clientId = ClientModel.getInstance().clientId;
         await RpcApi.SetMetaCommand(TabRpcClient, {
             oref: WOS.makeORef("client", clientId),
             meta: { "onboarding:githubstar": true },
@@ -165,7 +167,7 @@ const NoTelemetryStarPage = ({ isCompact }: { isCompact: boolean }) => {
     };
 
     const handleMaybeLater = async () => {
-        const clientId = globalStore.get(atoms.clientId);
+        const clientId = ClientModel.getInstance().clientId;
         await RpcApi.SetMetaCommand(TabRpcClient, {
             oref: WOS.makeORef("client", clientId),
             meta: { "onboarding:githubstar": false },
@@ -225,7 +227,7 @@ const FeaturesPage = () => {
 const NewInstallOnboardingModal = () => {
     const modalRef = useRef<HTMLDivElement | null>(null);
     const [pageName, setPageName] = useAtom(pageNameAtom);
-    const clientData = useAtomValue(atoms.client);
+    const clientData = useAtomValue(ClientModel.getInstance().clientAtom);
     const [isCompact, setIsCompact] = useState<boolean>(window.innerHeight < 800);
 
     const updateModalHeight = () => {

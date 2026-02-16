@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,13 +16,31 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/launchdarkly/eventsource"
+	"github.com/wavetermdev/waveterm/pkg/aiusechat/aiutil"
 	"github.com/wavetermdev/waveterm/pkg/aiusechat/chatstore"
 	"github.com/wavetermdev/waveterm/pkg/aiusechat/uctypes"
 	"github.com/wavetermdev/waveterm/pkg/util/logutil"
 	"github.com/wavetermdev/waveterm/pkg/util/utilfn"
-	"github.com/wavetermdev/waveterm/pkg/wcore"
 	"github.com/wavetermdev/waveterm/pkg/web/sse"
 )
+
+// sanitizeHostnameInError removes the Wave cloud hostname from error messages
+func sanitizeHostnameInError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	errStr := err.Error()
+	parsedURL, parseErr := url.Parse(uctypes.DefaultAIEndpoint)
+	if parseErr == nil && parsedURL.Host != "" {
+		if strings.Contains(errStr, parsedURL.Host) {
+			errStr = strings.ReplaceAll(errStr, uctypes.DefaultAIEndpoint, "AI service")
+			errStr = strings.ReplaceAll(errStr, parsedURL.Host, "host")
+		}
+	}
+
+	return fmt.Errorf("%s", errStr)
+}
 
 // ---------- OpenAI wire types (subset) ----------
 
@@ -77,26 +94,29 @@ type OpenAIMessageContent struct {
 	Name      string `json:"name,omitempty"`
 }
 
-func (c *OpenAIMessageContent) Clean() *OpenAIMessageContent {
-	if c.PreviewUrl == "" {
+func (c *OpenAIMessageContent) clean() *OpenAIMessageContent {
+	if c.PreviewUrl == "" && (c.Type != "input_image" || c.Filename == "") {
 		return c
 	}
 	rtn := *c
 	rtn.PreviewUrl = ""
+	if c.Type == "input_image" {
+		rtn.Filename = ""
+	}
 	return &rtn
 }
 
-func (m *OpenAIMessage) CleanAndCopy() *OpenAIMessage {
+func (m *OpenAIMessage) cleanAndCopy() *OpenAIMessage {
 	rtn := &OpenAIMessage{Role: m.Role}
 	rtn.Content = make([]OpenAIMessageContent, len(m.Content))
 	for idx, block := range m.Content {
-		cleaned := block.Clean()
+		cleaned := block.clean()
 		rtn.Content[idx] = *cleaned
 	}
 	return rtn
 }
 
-func (f *OpenAIFunctionCallInput) Clean() *OpenAIFunctionCallInput {
+func (f *OpenAIFunctionCallInput) clean() *OpenAIFunctionCallInput {
 	if f.ToolUseData == nil {
 		return f
 	}
@@ -119,12 +139,19 @@ func (m *OpenAIChatMessage) GetMessageId() string {
 	return m.MessageId
 }
 
+func (m *OpenAIChatMessage) GetRole() string {
+	if m.Message != nil {
+		return m.Message.Role
+	}
+	return ""
+}
+
 func (m *OpenAIChatMessage) GetUsage() *uctypes.AIUsage {
 	if m.Usage == nil {
 		return nil
 	}
 	return &uctypes.AIUsage{
-		APIType:              "openai",
+		APIType:              uctypes.APIType_OpenAIResponses,
 		Model:                m.Usage.Model,
 		InputTokens:          m.Usage.InputTokens,
 		OutputTokens:         m.Usage.OutputTokens,
@@ -361,16 +388,17 @@ const (
 )
 
 type openaiBlockState struct {
-	kind         openaiBlockKind
-	localID      string // For SSE streaming to UI
-	toolCallID   string // For function calls
-	toolName     string // For function calls
-	summaryCount int    // For reasoning: number of summary parts seen
+	kind            openaiBlockKind
+	localID         string // For SSE streaming to UI
+	toolCallID      string // For function calls
+	toolName        string // For function calls
+	summaryCount    int    // For reasoning: number of summary parts seen
+	partialJSON     []byte // For function calls: accumulated JSON arguments
+	accumulatedText string // For text blocks: accumulated text content
 }
 
 type openaiStreamingState struct {
-	blockMap       map[string]*openaiBlockState             // Use item_id as key for UI streaming
-	toolUseData    map[string]*uctypes.UIMessageDataToolUse // Use toolCallId as key
+	blockMap       map[string]*openaiBlockState // Use item_id as key for UI streaming
 	msgID          string
 	model          string
 	stepStarted    bool
@@ -380,7 +408,7 @@ type openaiStreamingState struct {
 
 // ---------- Public entrypoint ----------
 
-func UpdateToolUseData(chatId string, callId string, newToolUseData *uctypes.UIMessageDataToolUse) error {
+func UpdateToolUseData(chatId string, callId string, newToolUseData uctypes.UIMessageDataToolUse) error {
 	chat := chatstore.DefaultChatStore.Get(chatId)
 	if chat == nil {
 		return fmt.Errorf("chat not found: %s", chatId)
@@ -395,7 +423,7 @@ func UpdateToolUseData(chatId string, callId string, newToolUseData *uctypes.UIM
 		if chatMsg.FunctionCall != nil && chatMsg.FunctionCall.CallId == callId {
 			updatedMsg := *chatMsg
 			updatedFunctionCall := *chatMsg.FunctionCall
-			updatedFunctionCall.ToolUseData = newToolUseData
+			updatedFunctionCall.ToolUseData = &newToolUseData
 			updatedMsg.FunctionCall = &updatedFunctionCall
 
 			aiOpts := &uctypes.AIOptsType{
@@ -409,6 +437,27 @@ func UpdateToolUseData(chatId string, callId string, newToolUseData *uctypes.UIM
 	}
 
 	return fmt.Errorf("function call with callId %s not found in chat %s", callId, chatId)
+}
+
+func RemoveToolUseCall(chatId string, callId string) error {
+	chat := chatstore.DefaultChatStore.Get(chatId)
+	if chat == nil {
+		return fmt.Errorf("chat not found: %s", chatId)
+	}
+
+	for _, genMsg := range chat.NativeMessages {
+		chatMsg, ok := genMsg.(*OpenAIChatMessage)
+		if !ok {
+			continue
+		}
+
+		if chatMsg.FunctionCall != nil && chatMsg.FunctionCall.CallId == callId {
+			chatstore.DefaultChatStore.RemoveMessage(chatId, chatMsg.MessageId)
+			return nil
+		}
+	}
+
+	return nil
 }
 
 func RunOpenAIChatStep(
@@ -464,10 +513,10 @@ func RunOpenAIChatStep(
 		// Convert to appropriate input type based on what's populated
 		if chatMsg.Message != nil {
 			// Clean message to remove preview URLs
-			cleanedMsg := chatMsg.Message.CleanAndCopy()
+			cleanedMsg := chatMsg.Message.cleanAndCopy()
 			inputs = append(inputs, *cleanedMsg)
 		} else if chatMsg.FunctionCall != nil {
-			cleanedFunctionCall := chatMsg.FunctionCall.Clean()
+			cleanedFunctionCall := chatMsg.FunctionCall.clean()
 			inputs = append(inputs, *cleanedFunctionCall)
 		} else if chatMsg.FunctionCallOutput != nil {
 			inputs = append(inputs, *chatMsg.FunctionCallOutput)
@@ -495,7 +544,7 @@ func RunOpenAIChatStep(
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, sanitizeHostnameInError(err)
 	}
 	defer resp.Body.Close()
 
@@ -509,16 +558,14 @@ func RunOpenAIChatStep(
 			if rateLimitInfo.PReq == 0 && rateLimitInfo.Req > 0 {
 				// Premium requests exhausted, but regular requests available
 				stopReason := &uctypes.WaveStopReason{
-					Kind:          uctypes.StopKindPremiumRateLimit,
-					RateLimitInfo: rateLimitInfo,
+					Kind: uctypes.StopKindPremiumRateLimit,
 				}
 				return stopReason, nil, rateLimitInfo, nil
 			}
 			if rateLimitInfo.Req == 0 {
 				// All requests exhausted
 				stopReason := &uctypes.WaveStopReason{
-					Kind:          uctypes.StopKindRateLimit,
-					RateLimitInfo: rateLimitInfo,
+					Kind: uctypes.StopKindRateLimit,
 				}
 				return stopReason, nil, rateLimitInfo, nil
 			}
@@ -567,9 +614,8 @@ func parseOpenAIHTTPError(resp *http.Response) error {
 func handleOpenAIStreamingResp(ctx context.Context, sse *sse.SSEHandlerCh, decoder *eventsource.Decoder, cont *uctypes.WaveContinueResponse, chatOpts uctypes.WaveChatOpts) (*uctypes.WaveStopReason, []*OpenAIChatMessage) {
 	// Per-response state
 	state := &openaiStreamingState{
-		blockMap:    map[string]*openaiBlockState{},
-		toolUseData: map[string]*uctypes.UIMessageDataToolUse{},
-		chatOpts:    chatOpts,
+		blockMap: map[string]*openaiBlockState{},
+		chatOpts: chatOpts,
 	}
 
 	var rtnStopReason *uctypes.WaveStopReason
@@ -588,16 +634,6 @@ func handleOpenAIStreamingResp(ctx context.Context, sse *sse.SSEHandlerCh, decod
 
 	// SSE event processing loop
 	for {
-		// Check for context cancellation
-		if err := ctx.Err(); err != nil {
-			_ = sse.AiMsgError("request cancelled")
-			return &uctypes.WaveStopReason{
-				Kind:      uctypes.StopKindCanceled,
-				ErrorType: "cancelled",
-				ErrorText: "request cancelled",
-			}, rtnMessages
-		}
-
 		event, err := decoder.Decode()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -607,6 +643,19 @@ func handleOpenAIStreamingResp(ctx context.Context, sse *sse.SSEHandlerCh, decod
 					Kind:      uctypes.StopKindError,
 					ErrorType: "protocol",
 					ErrorText: "stream ended unexpectedly without completion",
+				}, rtnMessages
+			}
+			// Check if client disconnected
+			if sse.Err() != nil {
+				// SSE connection broken (client stopped/disconnected)
+				partialMessages := extractPartialTextFromState(state)
+				if partialMessages != nil {
+					rtnMessages = append(rtnMessages, partialMessages...)
+				}
+				return &uctypes.WaveStopReason{
+					Kind:      uctypes.StopKindCanceled,
+					ErrorType: "client_disconnect",
+					ErrorText: "client disconnected",
 				}, rtnMessages
 			}
 			// transport error mid-stream
@@ -619,16 +668,48 @@ func handleOpenAIStreamingResp(ctx context.Context, sse *sse.SSEHandlerCh, decod
 		}
 
 		if finalStopReason, finalMessages := handleOpenAIEvent(event, sse, state, cont); finalStopReason != nil {
-			// Either error or response.completed triggered return
 			rtnStopReason = finalStopReason
 			if finalMessages != nil {
 				rtnMessages = finalMessages
+			} else if finalStopReason.Kind == uctypes.StopKindCanceled {
+				partialMessages := extractPartialTextFromState(state)
+				if partialMessages != nil {
+					rtnMessages = append(rtnMessages, partialMessages...)
+				}
 			}
 			return finalStopReason, rtnMessages
 		}
 	}
 
 	// unreachable
+}
+
+// extractPartialTextFromState extracts accumulated text from streaming state when client disconnects
+func extractPartialTextFromState(state *openaiStreamingState) []*OpenAIChatMessage {
+	var textContent []OpenAIMessageContent
+
+	for _, blockState := range state.blockMap {
+		if blockState.kind == openaiBlockText && blockState.accumulatedText != "" {
+			textContent = append(textContent, OpenAIMessageContent{
+				Type: "output_text",
+				Text: blockState.accumulatedText,
+			})
+		}
+	}
+
+	if len(textContent) == 0 {
+		return nil
+	}
+
+	assistantMessage := &OpenAIChatMessage{
+		MessageId: uuid.New().String(),
+		Message: &OpenAIMessage{
+			Role:    "assistant",
+			Content: textContent,
+		},
+	}
+
+	return []*OpenAIChatMessage{assistantMessage}
 }
 
 // handleOpenAIEvent processes one SSE event block. It may emit SSE parts
@@ -643,6 +724,14 @@ func handleOpenAIEvent(
 	state *openaiStreamingState,
 	cont *uctypes.WaveContinueResponse,
 ) (final *uctypes.WaveStopReason, messages []*OpenAIChatMessage) {
+	if err := sse.Err(); err != nil {
+		return &uctypes.WaveStopReason{
+			Kind:      uctypes.StopKindCanceled,
+			ErrorType: "client_disconnect",
+			ErrorText: "client disconnected",
+		}, nil
+	}
+
 	eventName := event.Event()
 	data := event.Data()
 
@@ -746,6 +835,7 @@ func handleOpenAIEvent(
 		}
 
 		if st := state.blockMap[ev.ItemId]; st != nil && st.kind == openaiBlockText {
+			st.accumulatedText += ev.Delta
 			_ = sse.AiMsgTextDelta(st.localID, ev.Delta)
 		}
 		return nil, nil
@@ -780,8 +870,6 @@ func handleOpenAIEvent(
 				Kind:      uctypes.StopKindError,
 				ErrorType: "api",
 				ErrorText: errorMsg,
-				MessageID: state.msgID,
-				Model:     state.model,
 			}, nil
 		}
 
@@ -814,8 +902,6 @@ func handleOpenAIEvent(
 				Kind:      stopKind,
 				RawReason: reason,
 				ErrorText: errorMsg,
-				MessageID: state.msgID,
-				Model:     state.model,
 			}, finalMessages
 		}
 
@@ -830,8 +916,6 @@ func handleOpenAIEvent(
 		return &uctypes.WaveStopReason{
 			Kind:      stopKind,
 			RawReason: ev.Response.Status,
-			MessageID: state.msgID,
-			Model:     state.model,
 			ToolCalls: toolCalls,
 		}, finalMessages
 
@@ -841,7 +925,10 @@ func handleOpenAIEvent(
 			_ = sse.AiMsgError(err.Error())
 			return &uctypes.WaveStopReason{Kind: uctypes.StopKindError, ErrorType: "decode", ErrorText: err.Error()}, nil
 		}
-		// Noop as requested
+		if st := state.blockMap[ev.ItemId]; st != nil && st.kind == openaiBlockToolUse {
+			st.partialJSON = append(st.partialJSON, []byte(ev.Delta)...)
+			aiutil.SendToolProgress(st.toolCallID, st.toolName, st.partialJSON, state.chatOpts, sse, true)
+		}
 		return nil, nil
 
 	case "response.function_call_arguments.done":
@@ -853,16 +940,7 @@ func handleOpenAIEvent(
 
 		// Get the function call info from the block state
 		if st := state.blockMap[ev.ItemId]; st != nil && st.kind == openaiBlockToolUse {
-			// raw := json.RawMessage(ev.Arguments)
-			// no longer send tool inputs to fe
-			// _ = sse.AiMsgToolInputAvailable(st.toolCallID, st.toolName, raw)
-
-			toolDef := state.chatOpts.GetToolDefinition(st.toolName)
-			toolUseData := createToolUseData(st.toolCallID, st.toolName, toolDef, ev.Arguments, state.chatOpts)
-			state.toolUseData[st.toolCallID] = toolUseData
-			if toolUseData.Approval == uctypes.ApprovalNeedsApproval && state.chatOpts.RegisterToolApproval != nil {
-				state.chatOpts.RegisterToolApproval(st.toolCallID)
-			}
+			aiutil.SendToolProgress(st.toolCallID, st.toolName, []byte(ev.Arguments), state.chatOpts, sse, false)
 		}
 		return nil, nil
 
@@ -919,50 +997,6 @@ func handleOpenAIEvent(
 	}
 }
 
-func createToolUseData(toolCallID, toolName string, toolDef *uctypes.ToolDefinition, arguments string, chatOpts uctypes.WaveChatOpts) *uctypes.UIMessageDataToolUse {
-	toolUseData := &uctypes.UIMessageDataToolUse{
-		ToolCallId: toolCallID,
-		ToolName:   toolName,
-		Status:     uctypes.ToolUseStatusPending,
-	}
-
-	if toolDef == nil {
-		toolUseData.Status = uctypes.ToolUseStatusError
-		toolUseData.ErrorMessage = "tool not found"
-		return toolUseData
-	}
-
-	var parsedArgs any
-	if err := json.Unmarshal([]byte(arguments), &parsedArgs); err != nil {
-		toolUseData.Status = uctypes.ToolUseStatusError
-		toolUseData.ErrorMessage = fmt.Sprintf("failed to parse tool arguments: %v", err)
-		return toolUseData
-	}
-
-	if toolDef.ToolInputDesc != nil {
-		toolUseData.ToolDesc = toolDef.ToolInputDesc(parsedArgs)
-	}
-
-	if toolDef.ToolApproval != nil {
-		toolUseData.Approval = toolDef.ToolApproval(parsedArgs)
-	}
-
-	if chatOpts.TabId != "" {
-		if argsMap, ok := parsedArgs.(map[string]any); ok {
-			if widgetId, ok := argsMap["widget_id"].(string); ok && widgetId != "" {
-				ctx, cancelFn := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancelFn()
-				fullBlockId, err := wcore.ResolveBlockIdFromPrefix(ctx, chatOpts.TabId, widgetId)
-				if err == nil {
-					toolUseData.BlockId = fullBlockId
-				}
-			}
-		}
-	}
-
-	return toolUseData
-}
-
 // extractMessageAndToolsFromResponse extracts the final OpenAI message and tool calls from the completed response
 func extractMessageAndToolsFromResponse(resp openaiResponse, state *openaiStreamingState) ([]*OpenAIChatMessage, []uctypes.WaveToolCall) {
 	var messageContent []OpenAIMessageContent
@@ -997,13 +1031,6 @@ func extractMessageAndToolsFromResponse(resp openaiResponse, state *openaiStream
 				}
 			}
 
-			// Attach UIToolUseData if available
-			if data, ok := state.toolUseData[outputItem.CallId]; ok {
-				toolCall.ToolUseData = data
-			} else {
-				log.Printf("AI no data-tooluse for %s (callid: %s)\n", outputItem.Id, outputItem.CallId)
-			}
-
 			toolCalls = append(toolCalls, toolCall)
 
 			// Create separate FunctionCall message
@@ -1011,18 +1038,13 @@ func extractMessageAndToolsFromResponse(resp openaiResponse, state *openaiStream
 			if outputItem.Arguments != "" {
 				argsStr = outputItem.Arguments
 			}
-			var toolUseDataPtr *uctypes.UIMessageDataToolUse
-			if data, ok := state.toolUseData[outputItem.CallId]; ok {
-				toolUseDataPtr = data
-			}
 			functionCallMsg := &OpenAIChatMessage{
 				MessageId: uuid.New().String(),
 				FunctionCall: &OpenAIFunctionCallInput{
-					Type:        "function_call",
-					CallId:      outputItem.CallId,
-					Name:        outputItem.Name,
-					Arguments:   argsStr,
-					ToolUseData: toolUseDataPtr,
+					Type:      "function_call",
+					CallId:    outputItem.CallId,
+					Name:      outputItem.Name,
+					Arguments: argsStr,
 				},
 			}
 			messages = append(messages, functionCallMsg)

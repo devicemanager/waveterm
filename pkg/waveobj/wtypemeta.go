@@ -40,6 +40,7 @@ type MetaTSType struct {
 	Cmd                 string   `json:"cmd,omitempty"`
 	CmdInteractive      bool     `json:"cmd:interactive,omitempty"`
 	CmdLogin            bool     `json:"cmd:login,omitempty"`
+	CmdPersistent       bool     `json:"cmd:persistent,omitempty"`
 	CmdRunOnStart       bool     `json:"cmd:runonstart,omitempty"`
 	CmdClearOnStart     bool     `json:"cmd:clearonstart,omitempty"`
 	CmdRunOnce          bool     `json:"cmd:runonce,omitempty"`
@@ -74,6 +75,9 @@ type MetaTSType struct {
 	AIApiVersion string  `json:"ai:apiversion,omitempty"`
 	AiMaxTokens  float64 `json:"ai:maxtokens,omitempty"`
 	AiTimeoutMs  float64 `json:"ai:timeoutms,omitempty"`
+
+	AiFileDiffChatId     string `json:"aifilediff:chatid,omitempty"`
+	AiFileDiffToolCallId string `json:"aifilediff:toolcallid,omitempty"`
 
 	EditorClear               bool    `json:"editor:*,omitempty"`
 	EditorMinimapEnabled      bool    `json:"editor:minimapenabled,omitempty"`
@@ -115,7 +119,11 @@ type MetaTSType struct {
 	TermTransparency        *float64 `json:"term:transparency,omitempty"` // default 0.5
 	TermAllowBracketedPaste *bool    `json:"term:allowbracketedpaste,omitempty"`
 	TermShiftEnterNewline   *bool    `json:"term:shiftenternewline,omitempty"`
+	TermMacOptionIsMeta     *bool    `json:"term:macoptionismeta,omitempty"`
 	TermConnDebug           string   `json:"term:conndebug,omitempty"` // null, info, debug
+	TermBellSound           *bool    `json:"term:bellsound,omitempty"`
+	TermBellIndicator       *bool    `json:"term:bellindicator,omitempty"`
+	TermDurable             *bool    `json:"term:durable,omitempty"`
 
 	WebZoom          float64 `json:"web:zoom,omitempty"`
 	WebHideNav       *bool   `json:"web:hidenav,omitempty"`
@@ -128,6 +136,7 @@ type MetaTSType struct {
 	TsunamiClear          bool              `json:"tsunami:*,omitempty"`
 	TsunamiSdkReplacePath string            `json:"tsunami:sdkreplacepath,omitempty"`
 	TsunamiAppPath        string            `json:"tsunami:apppath,omitempty"`
+	TsunamiAppId          string            `json:"tsunami:appid,omitempty"`
 	TsunamiScaffoldPath   string            `json:"tsunami:scaffoldpath,omitempty"`
 	TsunamiEnv            map[string]string `json:"tsunami:env,omitempty"`
 

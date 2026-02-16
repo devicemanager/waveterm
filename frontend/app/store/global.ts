@@ -17,7 +17,15 @@ import {
 import { getWebServerEndpoint } from "@/util/endpoints";
 import { fetch } from "@/util/fetchutil";
 import { setPlatform } from "@/util/platformutil";
-import { deepCompareReturnPrev, fireAndForget, getPrefixedSettings, isBlank } from "@/util/util";
+import {
+    base64ToString,
+    deepCompareReturnPrev,
+    fireAndForget,
+    getPrefixedSettings,
+    isBlank,
+    isLocalConnName,
+    isWslConnName,
+} from "@/util/util";
 import { atom, Atom, PrimitiveAtom, useAtomValue } from "jotai";
 import { globalStore } from "./jotaiStore";
 import { modalsModel } from "./modalmodel";
@@ -31,17 +39,8 @@ let globalPrimaryTabStartup: boolean = false;
 const blockComponentModelMap = new Map<string, BlockComponentModel>();
 const Counters = new Map<string, number>();
 const ConnStatusMapAtom = atom(new Map<string, PrimitiveAtom<ConnStatus>>());
-const blockAtomCache = new Map<string, Map<string, Atom<any>>>();
-const tabAtomCache = new Map<string, Map<string, Atom<any>>>();
-
-type GlobalInitOptions = {
-    tabId: string;
-    platform: NodeJS.Platform;
-    windowId: string;
-    clientId: string;
-    environment: "electron" | "renderer";
-    primaryTabStartup?: boolean;
-};
+const TabIndicatorMap = new Map<string, PrimitiveAtom<TabIndicator>>();
+const orefAtomCache = new Map<string, Map<string, Atom<any>>>();
 
 function initGlobal(initOpts: GlobalInitOptions) {
     globalEnvironment = initOpts.environment;
@@ -52,7 +51,12 @@ function initGlobal(initOpts: GlobalInitOptions) {
 
 function initGlobalAtoms(initOpts: GlobalInitOptions) {
     const windowIdAtom = atom(initOpts.windowId) as PrimitiveAtom<string>;
-    const clientIdAtom = atom(initOpts.clientId) as PrimitiveAtom<string>;
+    const builderIdAtom = atom(initOpts.builderId) as PrimitiveAtom<string>;
+    const builderAppIdAtom = atom<string>(null) as PrimitiveAtom<string>;
+    const waveWindowTypeAtom = atom((get) => {
+        const builderId = get(builderIdAtom);
+        return builderId != null ? "builder" : "tab";
+    }) as Atom<"tab" | "builder">;
     const uiContextAtom = atom((get) => {
         const uiContext: UIContext = {
             windowid: initOpts.windowId,
@@ -66,41 +70,37 @@ function initGlobalAtoms(initOpts: GlobalInitOptions) {
         getApi().onFullScreenChange((isFullScreen) => {
             globalStore.set(isFullScreenAtom, isFullScreen);
         });
-    } catch (_) {
-        // do nothing
+    } catch (e) {
+        console.log("failed to initialize isFullScreenAtom", e);
+    }
+
+    const zoomFactorAtom = atom(1.0) as PrimitiveAtom<number>;
+    try {
+        globalStore.set(zoomFactorAtom, getApi().getZoomFactor());
+        getApi().onZoomFactorChange((zoomFactor) => {
+            globalStore.set(zoomFactorAtom, zoomFactor);
+        });
+    } catch (e) {
+        console.log("failed to initialize zoomFactorAtom", e);
     }
 
     try {
         getApi().onMenuItemAbout(() => {
             modalsModel.pushModal("AboutModal");
         });
-    } catch (_) {
-        // do nothing
+    } catch (e) {
+        console.log("failed to initialize onMenuItemAbout handler", e);
     }
 
-    const clientAtom: Atom<Client> = atom((get) => {
-        const clientId = get(clientIdAtom);
-        if (clientId == null) {
-            return null;
-        }
-        return WOS.getObjectValue(WOS.makeORef("client", clientId), get);
-    });
-    const windowDataAtom: Atom<WaveWindow> = atom((get) => {
-        const windowId = get(windowIdAtom);
-        if (windowId == null) {
-            return null;
-        }
-        const rtn = WOS.getObjectValue<WaveWindow>(WOS.makeORef("window", windowId), get);
-        return rtn;
-    });
     const workspaceAtom: Atom<Workspace> = atom((get) => {
-        const windowData = get(windowDataAtom);
+        const windowData = WOS.getObjectValue<WaveWindow>(WOS.makeORef("window", get(windowIdAtom)), get);
         if (windowData == null) {
             return null;
         }
         return WOS.getObjectValue(WOS.makeORef("workspace", windowData.workspaceid), get);
     });
     const fullConfigAtom = atom(null) as PrimitiveAtom<FullConfigType>;
+    const waveaiModeConfigAtom = atom(null) as PrimitiveAtom<Record<string, AIModeConfigType>>;
     const settingsAtom = atom((get) => {
         return get(fullConfigAtom)?.settings ?? {};
     }) as Atom<SettingsType>;
@@ -116,9 +116,6 @@ function initGlobalAtoms(initOpts: GlobalInitOptions) {
         }
         return false;
     }) as Atom<boolean>;
-    const tabAtom: Atom<Tab> = atom((get) => {
-        return WOS.getObjectValue(WOS.makeORef("tab", initOpts.tabId), get);
-    });
     // this is *the* tab that this tabview represents.  it should never change.
     const staticTabIdAtom: Atom<string> = atom(initOpts.tabId);
     const controlShiftDelayAtom = atom(false);
@@ -128,8 +125,8 @@ function initGlobalAtoms(initOpts: GlobalInitOptions) {
         getApi().onUpdaterStatusChange((status) => {
             globalStore.set(updaterStatusAtom, status);
         });
-    } catch (_) {
-        // do nothing
+    } catch (e) {
+        console.log("failed to initialize updaterStatusAtom", e);
     }
 
     const reducedMotionSettingAtom = atom((get) => get(settingsAtom)?.["window:reducedmotion"]);
@@ -151,7 +148,17 @@ function initGlobalAtoms(initOpts: GlobalInitOptions) {
         });
     }
 
-    const typeAheadModalAtom = atom({});
+    const documentHasFocusAtom = atom(true) as PrimitiveAtom<boolean>;
+    if (globalThis.window != null) {
+        globalStore.set(documentHasFocusAtom, document.hasFocus());
+        window.addEventListener("focus", () => {
+            globalStore.set(documentHasFocusAtom, true);
+        });
+        window.addEventListener("blur", () => {
+            globalStore.set(documentHasFocusAtom, false);
+        });
+    }
+
     const modalOpen = atom(false);
     const allConnStatusAtom = atom<ConnStatus[]>((get) => {
         const connStatusMap = get(ConnStatusMapAtom);
@@ -165,30 +172,30 @@ function initGlobalAtoms(initOpts: GlobalInitOptions) {
     const rateLimitInfoAtom = atom(null) as PrimitiveAtom<RateLimitInfo>;
     atoms = {
         // initialized in wave.ts (will not be null inside of application)
-        clientId: clientIdAtom,
+        builderId: builderIdAtom,
+        builderAppId: builderAppIdAtom,
+        waveWindowType: waveWindowTypeAtom,
         uiContext: uiContextAtom,
-        client: clientAtom,
-        waveWindow: windowDataAtom,
         workspace: workspaceAtom,
         fullConfigAtom,
+        waveaiModeConfigAtom,
         settingsAtom,
         hasCustomAIPresetsAtom,
-        tabAtom,
         staticTabId: staticTabIdAtom,
         isFullScreen: isFullScreenAtom,
+        zoomFactorAtom,
         controlShiftDelayAtom,
         updaterStatusAtom,
         prefersReducedMotionAtom,
-        typeAheadModalAtom,
+        documentHasFocus: documentHasFocusAtom,
         modalOpen,
         allConnStatus: allConnStatusAtom,
         flashErrors: flashErrorsAtom,
         notifications: notificationsAtom,
         notificationPopoverMode: notificationPopoverModeAtom,
         reinitVersion,
-        isTermMultiInput: atom(false),
         waveAIRateLimitInfoAtom: rateLimitInfoAtom,
-    };
+    } as GlobalAtomsType;
 }
 
 function initGlobalWaveEventSubs(initOpts: WaveInitOpts) {
@@ -207,6 +214,13 @@ function initGlobalWaveEventSubs(initOpts: WaveInitOpts) {
                 // console.log("config wave event handler", event);
                 const fullConfig = (event.data as WatcherUpdate).fullconfig;
                 globalStore.set(atoms.fullConfigAtom, fullConfig);
+            },
+        },
+        {
+            eventType: "waveai:modeconfig",
+            handler: (event) => {
+                const modeConfigs = (event.data as AIModeConfigUpdate).configs;
+                globalStore.set(atoms.waveaiModeConfigAtom, modeConfigs);
             },
         },
         {
@@ -234,6 +248,13 @@ function initGlobalWaveEventSubs(initOpts: WaveInitOpts) {
             handler: (event) => {
                 const rateLimitInfo: RateLimitInfo = event.data;
                 globalStore.set(atoms.waveAIRateLimitInfoAtom, rateLimitInfo);
+            },
+        },
+        {
+            eventType: "tab:indicator",
+            handler: (event) => {
+                const data: TabIndicatorEventData = event.data;
+                setTabIndicatorInternal(data.tabid, data.indicator);
             },
         }
     );
@@ -275,24 +296,24 @@ function useBlockMetaKeyAtom<T extends keyof MetaType>(blockId: string, key: T):
     return useAtomValue(getBlockMetaKeyAtom(blockId, key));
 }
 
-function getTabMetaKeyAtom<T extends keyof MetaType>(tabId: string, key: T): Atom<MetaType[T]> {
-    const tabCache = getSingleTabAtomCache(tabId);
+function getOrefMetaKeyAtom<T extends keyof MetaType>(oref: string, key: T): Atom<MetaType[T]> {
+    const orefCache = getSingleOrefAtomCache(oref);
     const metaAtomName = "#meta-" + key;
-    let metaAtom = tabCache.get(metaAtomName);
+    let metaAtom = orefCache.get(metaAtomName);
     if (metaAtom != null) {
         return metaAtom;
     }
     metaAtom = atom((get) => {
-        let tabAtom = WOS.getWaveObjectAtom(WOS.makeORef("tab", tabId));
-        let tabData = get(tabAtom);
-        return tabData?.meta?.[key];
+        let objAtom = WOS.getWaveObjectAtom(oref);
+        let objData = get(objAtom);
+        return objData?.meta?.[key];
     });
-    tabCache.set(metaAtomName, metaAtom);
+    orefCache.set(metaAtomName, metaAtom);
     return metaAtom;
 }
 
-function useTabMetaKeyAtom<T extends keyof MetaType>(tabId: string, key: T): MetaType[T] {
-    return useAtomValue(getTabMetaKeyAtom(tabId, key));
+function useOrefMetaKeyAtom<T extends keyof MetaType>(oref: string, key: T): MetaType[T] {
+    return useAtomValue(getOrefMetaKeyAtom(oref, key));
 }
 
 function getConnConfigKeyAtom<T extends keyof ConnKeywords>(connName: string, key: T): Atom<ConnKeywords[T]> {
@@ -343,7 +364,10 @@ function getOverrideConfigAtom<T extends keyof SettingsType>(blockId: string, ke
     return overrideAtom;
 }
 
-function useOverrideConfigAtom<T extends keyof SettingsType>(blockId: string, key: T): SettingsType[T] {
+function useOverrideConfigAtom<T extends keyof SettingsType>(blockId: string | null, key: T): SettingsType[T] {
+    if (blockId == null) {
+        return useAtomValue(getSettingsKeyAtom(key));
+    }
     return useAtomValue(getOverrideConfigAtom(blockId, key));
 }
 
@@ -382,30 +406,71 @@ function getSettingsPrefixAtom(prefix: string): Atom<SettingsType> {
 }
 
 function getSingleBlockAtomCache(blockId: string): Map<string, Atom<any>> {
-    let blockCache = blockAtomCache.get(blockId);
-    if (blockCache == null) {
-        blockCache = new Map<string, Atom<any>>();
-        blockAtomCache.set(blockId, blockCache);
-    }
-    return blockCache;
+    const blockORef = WOS.makeORef("block", blockId);
+    return getSingleOrefAtomCache(blockORef);
 }
 
 function getSingleConnAtomCache(connName: string): Map<string, Atom<any>> {
-    let blockCache = blockAtomCache.get(connName);
-    if (blockCache == null) {
-        blockCache = new Map<string, Atom<any>>();
-        blockAtomCache.set(connName, blockCache);
-    }
-    return blockCache;
+    // this is not a real "oref", but it will work for the cache.
+    const connORef = WOS.makeORef("conn", connName);
+    return getSingleOrefAtomCache(connORef);
 }
 
-function getSingleTabAtomCache(tabId: string): Map<string, Atom<any>> {
-    let tabCache = tabAtomCache.get(tabId);
-    if (tabCache == null) {
-        tabCache = new Map<string, Atom<any>>();
-        tabAtomCache.set(tabId, tabCache);
+function getSingleOrefAtomCache(oref: string): Map<string, Atom<any>> {
+    let orefCache = orefAtomCache.get(oref);
+    if (orefCache == null) {
+        orefCache = new Map<string, Atom<any>>();
+        orefAtomCache.set(oref, orefCache);
     }
-    return tabCache;
+    return orefCache;
+}
+
+// this function should be kept up to date with IsBlockTermDurable in pkg/jobcontroller/jobcontroller.go
+// Note: null/false both map to false in the Go code, but this returns a special null value
+// to indicate when the block is not even eligible to be durable
+function getBlockTermDurableAtom(blockId: string): Atom<null | boolean> {
+    const blockCache = getSingleBlockAtomCache(blockId);
+    const durableAtomName = "#termdurable";
+    let durableAtom = blockCache.get(durableAtomName);
+    if (durableAtom != null) {
+        return durableAtom;
+    }
+    durableAtom = atom((get) => {
+        const blockAtom = WOS.getWaveObjectAtom<Block>(WOS.makeORef("block", blockId));
+        const block = get(blockAtom);
+
+        if (block == null) {
+            return null;
+        }
+
+        // Check if view is "term", and controller is "shell"
+        if (block.meta?.view != "term" || block.meta?.controller != "shell") {
+            return null;
+        }
+
+        // 1. Check if block has a JobId
+        if (block.jobid != null && block.jobid != "") {
+            return true;
+        }
+
+        // 2. Check if connection is local or WSL (not eligible for durability)
+        const connName = block.meta?.connection ?? "";
+        if (isLocalConnName(connName) || isWslConnName(connName)) {
+            return null;
+        }
+
+        // 3. Check config hierarchy: blockmeta → connection → global (default true)
+        const durableConfigAtom = getOverrideConfigAtom(blockId, "term:durable");
+        const durableConfig = get(durableConfigAtom);
+        if (durableConfig != null) {
+            return durableConfig;
+        }
+
+        // Default to true for non-local connections
+        return true;
+    });
+    blockCache.set(durableAtomName, durableAtom);
+    return durableAtom;
 }
 
 function useBlockAtom<T>(blockId: string, name: string, makeFn: () => Atom<T>): Atom<T> {
@@ -424,6 +489,16 @@ function useBlockDataLoaded(blockId: string): boolean {
         return WOS.getWaveObjectLoadingAtom(WOS.makeORef("block", blockId));
     });
     return useAtomValue(loadedAtom);
+}
+
+/**
+ * Safely read an atom value, returning null if the atom is null.
+ */
+function readAtom<T>(atom: Atom<T>): T {
+    if (atom == null) {
+        return null;
+    }
+    return globalStore.get(atom);
 }
 
 /**
@@ -544,7 +619,7 @@ async function fetchWaveFile(
     if (fileInfo64 == null) {
         throw new Error(`missing zone file info for ${zoneId}:${fileName}`);
     }
-    const fileInfo = JSON.parse(atob(fileInfo64));
+    const fileInfo = JSON.parse(base64ToString(fileInfo64));
     const data = await resp.arrayBuffer();
     return { data: new Uint8Array(data), fileInfo };
 }
@@ -588,6 +663,18 @@ function getHostName(): string {
         cachedHostName = getApi().getHostName();
     }
     return cachedHostName;
+}
+
+const LocalHostDisplayNameAtom: Atom<string> = atom((get) => {
+    const configValue = get(getSettingsKeyAtom("conn:localhostdisplayname"));
+    if (configValue != null) {
+        return configValue;
+    }
+    return getUserName() + "@" + getHostName();
+});
+
+function getLocalHostDisplayNameAtom(): Atom<string> {
+    return LocalHostDisplayNameAtom;
 }
 
 /**
@@ -682,6 +769,17 @@ async function loadConnStatus() {
     }
 }
 
+async function loadTabIndicators() {
+    const tabIndicators = await RpcApi.GetAllTabIndicatorsCommand(TabRpcClient);
+    if (tabIndicators == null) {
+        return;
+    }
+    for (const [tabId, indicator] of Object.entries(tabIndicators)) {
+        const curAtom = getTabIndicatorAtom(tabId);
+        globalStore.set(curAtom, indicator);
+    }
+}
+
 function subscribeToConnEvents() {
     waveEventSubscribe({
         eventType: "connchange",
@@ -705,19 +803,7 @@ function getConnStatusAtom(conn: string): PrimitiveAtom<ConnStatus> {
     const connStatusMap = globalStore.get(ConnStatusMapAtom);
     let rtn = connStatusMap.get(conn);
     if (rtn == null) {
-        if (isBlank(conn)) {
-            // create a fake "local" status atom that's always connected
-            const connStatus: ConnStatus = {
-                connection: conn,
-                connected: true,
-                error: null,
-                status: "connected",
-                hasconnected: true,
-                activeconnnum: 0,
-                wshenabled: false,
-            };
-            rtn = atom(connStatus);
-        } else if (conn.startsWith("aws:")) {
+        if (isLocalConnName(conn)) {
             const connStatus: ConnStatus = {
                 connection: conn,
                 connected: true,
@@ -745,6 +831,76 @@ function getConnStatusAtom(conn: string): PrimitiveAtom<ConnStatus> {
         globalStore.set(ConnStatusMapAtom, newConnStatusMap);
     }
     return rtn;
+}
+
+function getTabIndicatorAtom(tabId: string): PrimitiveAtom<TabIndicator> {
+    let rtn = TabIndicatorMap.get(tabId);
+    if (rtn == null) {
+        rtn = atom(null) as PrimitiveAtom<TabIndicator>;
+        TabIndicatorMap.set(tabId, rtn);
+    }
+    return rtn;
+}
+
+function setTabIndicatorInternal(tabId: string, indicator: TabIndicator) {
+    if (indicator == null) {
+        const indicatorAtom = getTabIndicatorAtom(tabId);
+        globalStore.set(indicatorAtom, null);
+        return;
+    }
+    const indicatorAtom = getTabIndicatorAtom(tabId);
+    const currentIndicator = globalStore.get(indicatorAtom);
+    if (currentIndicator == null) {
+        globalStore.set(indicatorAtom, indicator);
+        return;
+    }
+    if (indicator.priority >= currentIndicator.priority) {
+        if (indicator.clearonfocus && !currentIndicator.clearonfocus) {
+            indicator.persistentindicator = currentIndicator;
+        }
+        globalStore.set(indicatorAtom, indicator);
+    }
+}
+
+function setTabIndicator(tabId: string, indicator: TabIndicator) {
+    setTabIndicatorInternal(tabId, indicator);
+
+    const eventData: WaveEvent = {
+        event: "tab:indicator",
+        scopes: [WOS.makeORef("tab", tabId)],
+        data: {
+            tabid: tabId,
+            indicator: indicator,
+        } as TabIndicatorEventData,
+    };
+    fireAndForget(() => RpcApi.EventPublishCommand(TabRpcClient, eventData));
+}
+
+function clearTabIndicatorFromFocus(tabId: string) {
+    const indicatorAtom = getTabIndicatorAtom(tabId);
+    const currentIndicator = globalStore.get(indicatorAtom);
+    if (currentIndicator == null) {
+        return;
+    }
+    const persistentIndicator = currentIndicator.persistentindicator;
+    const eventData: WaveEvent = {
+        event: "tab:indicator",
+        scopes: [WOS.makeORef("tab", tabId)],
+        data: {
+            tabid: tabId,
+            indicator: persistentIndicator ?? null,
+        } as TabIndicatorEventData,
+    };
+    fireAndForget(() => RpcApi.EventPublishCommand(TabRpcClient, eventData));
+}
+
+function clearAllTabIndicators() {
+    for (const [tabId, indicatorAtom] of TabIndicatorMap.entries()) {
+        const indicator = globalStore.get(indicatorAtom);
+        if (indicator != null) {
+            setTabIndicator(tabId, null);
+        }
+    }
 }
 
 function pushFlashError(ferr: FlashErrorType) {
@@ -809,6 +965,8 @@ function recordTEvent(event: string, props?: TEventProps) {
 
 export {
     atoms,
+    clearAllTabIndicators,
+    clearTabIndicatorFromFocus,
     counterInc,
     countersClear,
     countersPrint,
@@ -821,14 +979,17 @@ export {
     getApi,
     getBlockComponentModel,
     getBlockMetaKeyAtom,
+    getBlockTermDurableAtom,
     getConnStatusAtom,
     getFocusedBlockId,
     getHostName,
+    getLocalHostDisplayNameAtom,
     getObjectId,
+    getOrefMetaKeyAtom,
     getOverrideConfigAtom,
     getSettingsKeyAtom,
     getSettingsPrefixAtom,
-    getTabMetaKeyAtom,
+    getTabIndicatorAtom,
     getUserName,
     globalPrimaryTabStartup,
     globalStore,
@@ -836,9 +997,11 @@ export {
     initGlobalWaveEventSubs,
     isDev,
     loadConnStatus,
+    loadTabIndicators,
     openLink,
     pushFlashError,
     pushNotification,
+    readAtom,
     recordTEvent,
     refocusNode,
     registerBlockComponentModel,
@@ -849,14 +1012,15 @@ export {
     setActiveTab,
     setNodeFocus,
     setPlatform,
+    setTabIndicator,
     subscribeToConnEvents,
     unregisterBlockComponentModel,
     useBlockAtom,
     useBlockCache,
     useBlockDataLoaded,
     useBlockMetaKeyAtom,
+    useOrefMetaKeyAtom,
     useOverrideConfigAtom,
     useSettingsKeyAtom,
-    useTabMetaKeyAtom,
     WOS,
 };

@@ -13,6 +13,34 @@ declare global {
         data64: string;
     };
 
+    // wconfig.AIModeConfigType
+    type AIModeConfigType = {
+        "display:name": string;
+        "display:order"?: number;
+        "display:icon"?: string;
+        "display:description"?: string;
+        "ai:provider"?: string;
+        "ai:apitype"?: string;
+        "ai:model"?: string;
+        "ai:thinkinglevel"?: string;
+        "ai:verbosity"?: string;
+        "ai:endpoint"?: string;
+        "ai:azureapiversion"?: string;
+        "ai:apitoken"?: string;
+        "ai:apitokensecretname"?: string;
+        "ai:azureresourcename"?: string;
+        "ai:azuredeployment"?: string;
+        "ai:capabilities"?: string[];
+        "ai:switchcompat"?: string[];
+        "waveai:cloud"?: boolean;
+        "waveai:premium"?: boolean;
+    };
+
+    // wconfig.AIModeConfigUpdate
+    type AIModeConfigUpdate = {
+        configs: {[key: string]: AIModeConfigType};
+    };
+
     // wshrpc.ActivityDisplayType
     type ActivityDisplayType = {
         width: number;
@@ -37,6 +65,7 @@ declare global {
         numsshconn?: number;
         numwslconn?: number;
         nummagnify?: number;
+        termcommandsrun?: number;
         numpanics?: number;
         numaireqs?: number;
         startup?: number;
@@ -55,12 +84,36 @@ declare global {
         message?: string;
     };
 
+    // wshrpc.AppInfo
+    type AppInfo = {
+        appid: string;
+        modtime: number;
+        manifest?: AppManifest;
+    };
+
+    // wshrpc.AppManifest
+    type AppManifest = {
+        appmeta: AppMeta;
+        configschema: {[key: string]: any};
+        dataschema: {[key: string]: any};
+        secrets: {[key: string]: SecretMeta};
+    };
+
+    // wshrpc.AppMeta
+    type AppMeta = {
+        title: string;
+        shortdesc: string;
+        icon: string;
+        iconcolor: string;
+    };
+
     // waveobj.Block
     type Block = WaveObj & {
         parentoref?: string;
         runtimeopts?: RuntimeOpts;
         stickers?: StickerType[];
         subblockids?: string[];
+        jobid?: string;
     };
 
     // blockcontroller.BlockControllerRuntimeStatus
@@ -85,14 +138,20 @@ declare global {
         tabid: string;
         workspaceid: string;
         block: Block;
-        files: FileInfo[];
+        files: WaveFileInfo[];
     };
 
-    // webcmd.BlockInputWSCommand
-    type BlockInputWSCommand = {
-        wscommand: "blockinput";
+    // wshrpc.BlockJobStatusData
+    type BlockJobStatusData = {
         blockid: string;
-        inputdata64: string;
+        jobid: string;
+        status?: null | "init" | "connected" | "disconnected" | "done";
+        versionts: number;
+        donereason?: string;
+        startuperror?: string;
+        cmdexitts?: number;
+        cmdexitcode?: number;
+        cmdexitsignal?: string;
     };
 
     // wshrpc.BlocksListEntry
@@ -110,12 +169,25 @@ declare global {
         workspaceid?: string;
     };
 
+    // wshrpc.BuilderStatusData
+    type BuilderStatusData = {
+        status: string;
+        port?: number;
+        exitcode?: number;
+        errormsg?: string;
+        version: number;
+        manifest?: AppManifest;
+        secretbindings?: {[key: string]: string};
+        secretbindingscomplete: boolean;
+    };
+
     // waveobj.Client
     type Client = WaveObj & {
         windowids: string[];
         tosagreed?: number;
         hasoldhistory?: boolean;
         tempoid?: string;
+        installid?: string;
     };
 
     // workspaceservice.CloseTabRtnType
@@ -124,19 +196,23 @@ declare global {
         newactivetabid?: string;
     };
 
-    // wshrpc.CommandAppendIJsonData
-    type CommandAppendIJsonData = {
-        zoneid: string;
-        filename: string;
-        data: {[key: string]: any};
+    // wshrpc.CommandAuthenticateJobManagerData
+    type CommandAuthenticateJobManagerData = {
+        jobid: string;
+        jobauthtoken: string;
     };
 
     // wshrpc.CommandAuthenticateRtnData
     type CommandAuthenticateRtnData = {
         routeid: string;
-        authtoken?: string;
         env?: {[key: string]: string};
         initscripttext?: string;
+        rpccontext?: RpcContext;
+    };
+
+    // wshrpc.CommandAuthenticateToJobData
+    type CommandAuthenticateToJobData = {
+        jobaccesstoken: string;
     };
 
     // wshrpc.CommandAuthenticateTokenData
@@ -152,15 +228,22 @@ declare global {
         termsize?: TermSize;
     };
 
-    // wshrpc.CommandBlockSetViewData
-    type CommandBlockSetViewData = {
-        blockid: string;
-        view: string;
-    };
-
     // wshrpc.CommandCaptureBlockScreenshotData
     type CommandCaptureBlockScreenshotData = {
         blockid: string;
+    };
+
+    // wshrpc.CommandCheckGoVersionRtnData
+    type CommandCheckGoVersionRtnData = {
+        gostatus: string;
+        gopath: string;
+        goversion: string;
+        errorstring?: string;
+    };
+
+    // wshrpc.CommandConnServerInitData
+    type CommandConnServerInitData = {
+        clientid: string;
     };
 
     // wshrpc.CommandControllerAppendOutputData
@@ -195,6 +278,12 @@ declare global {
         blockdef: BlockDef;
     };
 
+    // wshrpc.CommandDeleteAppFileData
+    type CommandDeleteAppFileData = {
+        appid: string;
+        filename: string;
+    };
+
     // wshrpc.CommandDeleteBlockData
     type CommandDeleteBlockData = {
         blockid: string;
@@ -211,6 +300,28 @@ declare global {
         routeid: string;
     };
 
+    // wshrpc.CommandElectronDecryptData
+    type CommandElectronDecryptData = {
+        ciphertext: string;
+    };
+
+    // wshrpc.CommandElectronDecryptRtnData
+    type CommandElectronDecryptRtnData = {
+        plaintext: string;
+        storagebackend: string;
+    };
+
+    // wshrpc.CommandElectronEncryptData
+    type CommandElectronEncryptData = {
+        plaintext: string;
+    };
+
+    // wshrpc.CommandElectronEncryptRtnData
+    type CommandElectronEncryptRtnData = {
+        ciphertext: string;
+        storagebackend: string;
+    };
+
     // wshrpc.CommandEventReadHistoryData
     type CommandEventReadHistoryData = {
         event: string;
@@ -225,6 +336,12 @@ declare global {
         opts?: FileCopyOpts;
     };
 
+    // wshrpc.CommandFileRestoreBackupData
+    type CommandFileRestoreBackupData = {
+        backupfilepath: string;
+        restoretofilename: string;
+    };
+
     // wshrpc.CommandGetMetaData
     type CommandGetMetaData = {
         oref: ORef;
@@ -235,15 +352,130 @@ declare global {
         oref: ORef;
     };
 
+    // wshrpc.CommandGetTempDirData
+    type CommandGetTempDirData = {
+        filename?: string;
+    };
+
     // wshrpc.CommandGetWaveAIChatData
     type CommandGetWaveAIChatData = {
         chatid: string;
     };
 
+    // wshrpc.CommandJobCmdExitedData
+    type CommandJobCmdExitedData = {
+        jobid: string;
+        exitcode?: number;
+        exitsignal?: string;
+        exiterr?: string;
+        exitts?: number;
+    };
+
+    // wshrpc.CommandJobConnectRtnData
+    type CommandJobConnectRtnData = {
+        seq: number;
+        streamdone?: boolean;
+        streamerror?: string;
+        hasexited?: boolean;
+        exitcode?: number;
+        exitsignal?: string;
+        exiterr?: string;
+    };
+
+    // wshrpc.CommandJobControllerAttachJobData
+    type CommandJobControllerAttachJobData = {
+        jobid: string;
+        blockid: string;
+    };
+
+    // wshrpc.CommandJobControllerStartJobData
+    type CommandJobControllerStartJobData = {
+        connname: string;
+        jobkind: string;
+        cmd: string;
+        args: string[];
+        env: {[key: string]: string};
+        termsize?: TermSize;
+    };
+
+    // wshrpc.CommandJobInputData
+    type CommandJobInputData = {
+        jobid: string;
+        inputsessionid?: string;
+        seqnum?: number;
+        inputdata64?: string;
+        signame?: string;
+        termsize?: TermSize;
+    };
+
+    // wshrpc.CommandJobPrepareConnectData
+    type CommandJobPrepareConnectData = {
+        streammeta: StreamMeta;
+        seq: number;
+        termsize: TermSize;
+    };
+
+    // wshrpc.CommandJobStartStreamData
+    type CommandJobStartStreamData = {
+    };
+
+    // wshrpc.CommandListAllAppFilesData
+    type CommandListAllAppFilesData = {
+        appid: string;
+    };
+
+    // wshrpc.CommandListAllAppFilesRtnData
+    type CommandListAllAppFilesRtnData = {
+        path: string;
+        absolutepath: string;
+        parentdir?: string;
+        entries: DirEntryOut[];
+        entrycount: number;
+        totalentries: number;
+        truncated?: boolean;
+    };
+
+    // wshrpc.CommandMakeDraftFromLocalData
+    type CommandMakeDraftFromLocalData = {
+        localappid: string;
+    };
+
+    // wshrpc.CommandMakeDraftFromLocalRtnData
+    type CommandMakeDraftFromLocalRtnData = {
+        draftappid: string;
+    };
+
     // wshrpc.CommandMessageData
     type CommandMessageData = {
-        oref: ORef;
         message: string;
+    };
+
+    // wshrpc.CommandPublishAppData
+    type CommandPublishAppData = {
+        appid: string;
+    };
+
+    // wshrpc.CommandPublishAppRtnData
+    type CommandPublishAppRtnData = {
+        publishedappid: string;
+    };
+
+    // wshrpc.CommandReadAppFileData
+    type CommandReadAppFileData = {
+        appid: string;
+        filename: string;
+    };
+
+    // wshrpc.CommandReadAppFileRtnData
+    type CommandReadAppFileRtnData = {
+        data64: string;
+        notfound?: boolean;
+        modts?: number;
+    };
+
+    // wshrpc.CommandRemoteDisconnectFromJobManagerData
+    type CommandRemoteDisconnectFromJobManagerData = {
+        jobid: string;
     };
 
     // wshrpc.CommandRemoteListEntriesData
@@ -257,16 +489,54 @@ declare global {
         fileinfo?: FileInfo[];
     };
 
+    // wshrpc.CommandRemoteReconnectToJobManagerData
+    type CommandRemoteReconnectToJobManagerData = {
+        jobid: string;
+        jobauthtoken: string;
+        mainserverjwttoken: string;
+        jobmanagerpid: number;
+        jobmanagerstartts: number;
+    };
+
+    // wshrpc.CommandRemoteReconnectToJobManagerRtnData
+    type CommandRemoteReconnectToJobManagerRtnData = {
+        success: boolean;
+        jobmanagergone: boolean;
+        error?: string;
+    };
+
+    // wshrpc.CommandRemoteStartJobData
+    type CommandRemoteStartJobData = {
+        cmd: string;
+        args: string[];
+        env: {[key: string]: string};
+        termsize: TermSize;
+        streammeta?: StreamMeta;
+        jobauthtoken: string;
+        jobid: string;
+        mainserverjwttoken: string;
+        clientid: string;
+        publickeybase64: string;
+    };
+
     // wshrpc.CommandRemoteStreamFileData
     type CommandRemoteStreamFileData = {
         path: string;
         byterange?: string;
     };
 
-    // wshrpc.CommandRemoteStreamTarData
-    type CommandRemoteStreamTarData = {
-        path: string;
-        opts?: FileCopyOpts;
+    // wshrpc.CommandRemoteTerminateJobManagerData
+    type CommandRemoteTerminateJobManagerData = {
+        jobid: string;
+        jobmanagerpid: number;
+        jobmanagerstartts: number;
+    };
+
+    // wshrpc.CommandRenameAppFileData
+    type CommandRenameAppFileData = {
+        appid: string;
+        fromfilename: string;
+        tofilename: string;
     };
 
     // wshrpc.CommandResolveIdsData
@@ -280,6 +550,11 @@ declare global {
         resolvedids: {[key: string]: ORef};
     };
 
+    // wshrpc.CommandRestartBuilderAndWaitData
+    type CommandRestartBuilderAndWaitData = {
+        builderid: string;
+    };
+
     // wshrpc.CommandSetMetaData
     type CommandSetMetaData = {
         oref: ORef;
@@ -290,12 +565,56 @@ declare global {
     type CommandSetRTInfoData = {
         oref: ORef;
         data: ObjRTInfo;
+        delete?: boolean;
+    };
+
+    // wshrpc.CommandStartBuilderData
+    type CommandStartBuilderData = {
+        builderid: string;
+    };
+
+    // wshrpc.CommandStartJobData
+    type CommandStartJobData = {
+        cmd: string;
+        args: string[];
+        env: {[key: string]: string};
+        termsize: TermSize;
+        streammeta?: StreamMeta;
+    };
+
+    // wshrpc.CommandStartJobRtnData
+    type CommandStartJobRtnData = {
+        cmdpid: number;
+        cmdstartts: number;
+        jobmanagerpid: number;
+        jobmanagerstartts: number;
+    };
+
+    // wshrpc.CommandStreamAckData
+    type CommandStreamAckData = {
+        id: string;
+        seq: number;
+        rwnd: number;
+        fin?: boolean;
+        delay?: number;
+        cancel?: boolean;
+        error?: string;
+    };
+
+    // wshrpc.CommandStreamData
+    type CommandStreamData = {
+        id: string;
+        seq: number;
+        data64?: string;
+        eof?: boolean;
+        error?: string;
     };
 
     // wshrpc.CommandTermGetScrollbackLinesData
     type CommandTermGetScrollbackLinesData = {
         linestart: number;
         lineend: number;
+        lastcommand: boolean;
     };
 
     // wshrpc.CommandTermGetScrollbackLinesRtnData
@@ -336,11 +655,29 @@ declare global {
         newchat?: boolean;
     };
 
+    // wshrpc.CommandWaveAIGetToolDiffData
+    type CommandWaveAIGetToolDiffData = {
+        chatid: string;
+        toolcallid: string;
+    };
+
+    // wshrpc.CommandWaveAIGetToolDiffRtnData
+    type CommandWaveAIGetToolDiffRtnData = {
+        originalcontents64: string;
+        modifiedcontents64: string;
+    };
+
     // wshrpc.CommandWaveAIToolApproveData
     type CommandWaveAIToolApproveData = {
         toolcallid: string;
-        keepalive?: boolean;
         approval?: string;
+    };
+
+    // wshrpc.CommandWaveFileReadStreamData
+    type CommandWaveFileReadStreamData = {
+        zoneid: string;
+        name: string;
+        streammeta: StreamMeta;
     };
 
     // wshrpc.CommandWebSelectorData
@@ -350,6 +687,36 @@ declare global {
         tabid: string;
         selector: string;
         opts?: WebSelectorOpts;
+    };
+
+    // wshrpc.CommandWriteAppFileData
+    type CommandWriteAppFileData = {
+        appid: string;
+        filename: string;
+        data64: string;
+    };
+
+    // wshrpc.CommandWriteAppGoFileData
+    type CommandWriteAppGoFileData = {
+        appid: string;
+        data64: string;
+    };
+
+    // wshrpc.CommandWriteAppGoFileRtnData
+    type CommandWriteAppGoFileRtnData = {
+        data64: string;
+    };
+
+    // wshrpc.CommandWriteAppSecretBindingsData
+    type CommandWriteAppSecretBindingsData = {
+        appid: string;
+        bindings: {[key: string]: string};
+    };
+
+    // wshrpc.CommandWriteTempFileData
+    type CommandWriteTempFileData = {
+        filename: string;
+        data64: string;
     };
 
     // wconfig.ConfigError
@@ -383,6 +750,7 @@ declare global {
         "term:fontsize"?: number;
         "term:fontfamily"?: string;
         "term:theme"?: string;
+        "term:durable"?: boolean;
         "cmd:env"?: {[key: string]: string};
         "cmd:initscript"?: string;
         "cmd:initscript.sh"?: string;
@@ -394,6 +762,7 @@ declare global {
         "ssh:hostname"?: string;
         "ssh:port"?: string;
         "ssh:identityfile"?: string[];
+        "ssh:passwordsecretname"?: string;
         "ssh:batchmode"?: boolean;
         "ssh:pubkeyauthentication"?: boolean;
         "ssh:passwordauthentication"?: boolean;
@@ -417,6 +786,7 @@ declare global {
     // wshrpc.ConnStatus
     type ConnStatus = {
         status: string;
+        connhealthstatus?: string;
         wshenabled: boolean;
         connection: string;
         connected: boolean;
@@ -426,12 +796,25 @@ declare global {
         wsherror?: string;
         nowshreason?: string;
         wshversion?: string;
+        lastactivitybeforestalledtime?: number;
+        keepalivesenttime?: number;
     };
 
     // wshrpc.CpuDataRequest
     type CpuDataRequest = {
         id: string;
         count: number;
+    };
+
+    // wshrpc.DirEntryOut
+    type DirEntryOut = {
+        name: string;
+        dir?: boolean;
+        symlink?: boolean;
+        size?: number;
+        mode: string;
+        modified: string;
+        modifiedtime: string;
     };
 
     // vdom.DomRect
@@ -530,10 +913,17 @@ declare global {
         append?: boolean;
     };
 
-    // wshrpc.FileShareCapability
-    type FileShareCapability = {
-        canappend: boolean;
-        canmkdir: boolean;
+    // wshrpc.FocusedBlockData
+    type FocusedBlockData = {
+        blockid: string;
+        viewtype: string;
+        controller: string;
+        connname: string;
+        blockmeta: MetaType;
+        termjobstatus?: BlockJobStatusData;
+        connstatus?: ConnStatus;
+        termshellintegrationstatus?: string;
+        termlastcommand?: string;
     };
 
     // wconfig.FullConfigType
@@ -546,7 +936,41 @@ declare global {
         termthemes: {[key: string]: TermThemeType};
         connections: {[key: string]: ConnKeywords};
         bookmarks: {[key: string]: WebBookmark};
+        waveai: {[key: string]: AIModeConfigType};
         configerrors: ConfigError[];
+    };
+
+    // waveobj.Job
+    type Job = WaveObj & {
+        connection: string;
+        jobkind: string;
+        cmd: string;
+        cmdargs?: string[];
+        cmdenv?: {[key: string]: string};
+        jobauthtoken: string;
+        attachedblockid?: string;
+        waveversion?: string;
+        terminateonreconnect?: boolean;
+        jobmanagerstatus: string;
+        jobmanagerdonereason?: string;
+        jobmanagerstartuperror?: string;
+        jobmanagerpid?: number;
+        jobmanagerstartts?: number;
+        cmdpid?: number;
+        cmdstartts?: number;
+        cmdtermsize: TermSize;
+        cmdexitts?: number;
+        cmdexitcode?: number;
+        cmdexitsignal?: string;
+        cmdexiterror?: string;
+        streamdone?: boolean;
+        streamerror?: string;
+    };
+
+    // wshrpc.JobManagerStatusUpdate
+    type JobManagerStatusUpdate = {
+        jobid: string;
+        jobmanagerstatus: string;
     };
 
     // waveobj.LayoutActionData
@@ -604,6 +1028,7 @@ declare global {
         cmd?: string;
         "cmd:interactive"?: boolean;
         "cmd:login"?: boolean;
+        "cmd:persistent"?: boolean;
         "cmd:runonstart"?: boolean;
         "cmd:clearonstart"?: boolean;
         "cmd:runonce"?: boolean;
@@ -634,6 +1059,8 @@ declare global {
         "ai:apiversion"?: string;
         "ai:maxtokens"?: number;
         "ai:timeoutms"?: number;
+        "aifilediff:chatid"?: string;
+        "aifilediff:toolcallid"?: string;
         "editor:*"?: boolean;
         "editor:minimapenabled"?: boolean;
         "editor:stickyscrollenabled"?: boolean;
@@ -667,7 +1094,11 @@ declare global {
         "term:transparency"?: number;
         "term:allowbracketedpaste"?: boolean;
         "term:shiftenternewline"?: boolean;
+        "term:macoptionismeta"?: boolean;
         "term:conndebug"?: string;
+        "term:bellsound"?: boolean;
+        "term:bellindicator"?: boolean;
+        "term:durable"?: boolean;
         "web:zoom"?: number;
         "web:hidenav"?: boolean;
         "web:partition"?: string;
@@ -677,6 +1108,7 @@ declare global {
         "tsunami:*"?: boolean;
         "tsunami:sdkreplacepath"?: string;
         "tsunami:apppath"?: string;
+        "tsunami:appid"?: string;
         "tsunami:scaffoldpath"?: string;
         "tsunami:env"?: {[key: string]: string};
         "vdom:*"?: boolean;
@@ -707,23 +1139,23 @@ declare global {
 
     // waveobj.ObjRTInfo
     type ObjRTInfo = {
-        "tsunami:title"?: string;
-        "tsunami:shortdesc"?: string;
+        "tsunami:appmeta"?: AppMeta;
         "tsunami:schemas"?: any;
-        "cmd:hascurcwd"?: boolean;
+        "shell:hascurcwd"?: boolean;
         "shell:state"?: string;
         "shell:type"?: string;
         "shell:version"?: string;
         "shell:uname"?: string;
+        "shell:integration"?: boolean;
         "shell:inputempty"?: boolean;
         "shell:lastcmd"?: string;
         "shell:lastcmdexitcode"?: number;
-    };
-
-    // iochantypes.Packet
-    type Packet = {
-        Data: string;
-        Checksum: string;
+        "builder:layout"?: {[key: string]: number};
+        "builder:appid"?: string;
+        "builder:env"?: {[key: string]: string};
+        "waveai:chatid"?: string;
+        "waveai:mode"?: string;
+        "waveai:maxoutputtokens"?: number;
     };
 
     // wshrpc.PathCommandData
@@ -756,6 +1188,24 @@ declare global {
         clientos: string;
         clientversion: string;
         shell: string;
+        homedir: string;
+    };
+
+    // wshrpc.RestartBuilderAndWaitResult
+    type RestartBuilderAndWaitResult = {
+        success: boolean;
+        errormessage?: string;
+        buildoutput: string;
+    };
+
+    // wshrpc.RpcContext
+    type RpcContext = {
+        sockname?: string;
+        routeid: string;
+        procroute?: boolean;
+        blockid?: string;
+        conn?: string;
+        isrouter?: boolean;
     };
 
     // wshutil.RpcMessage
@@ -765,7 +1215,6 @@ declare global {
         resid?: string;
         timeout?: number;
         route?: string;
-        authtoken?: string;
         source?: string;
         cont?: boolean;
         cancel?: boolean;
@@ -787,11 +1236,10 @@ declare global {
         winsize?: WinSize;
     };
 
-    // webcmd.SetBlockTermSizeWSCommand
-    type SetBlockTermSizeWSCommand = {
-        wscommand: "setblocktermsize";
-        blockid: string;
-        termsize: TermSize;
+    // wshrpc.SecretMeta
+    type SecretMeta = {
+        desc: string;
+        optional: boolean;
     };
 
     // wconfig.SettingsType
@@ -801,6 +1249,12 @@ declare global {
         "app:dismissarchitecturewarning"?: boolean;
         "app:defaultnewblock"?: string;
         "app:showoverlayblocknums"?: boolean;
+        "app:ctrlvpaste"?: boolean;
+        "app:confirmquit"?: boolean;
+        "app:hideaibutton"?: boolean;
+        "app:disablectrlshiftarrows"?: boolean;
+        "app:disablectrlshiftdisplay"?: boolean;
+        "feature:waveappbuilder"?: boolean;
         "ai:*"?: boolean;
         "ai:preset"?: string;
         "ai:apitype"?: string;
@@ -815,6 +1269,8 @@ declare global {
         "ai:proxyurl"?: string;
         "ai:fontsize"?: number;
         "ai:fixedfontsize"?: number;
+        "waveai:showcloudmodes"?: boolean;
+        "waveai:defaultmode"?: string;
         "term:*"?: boolean;
         "term:fontsize"?: number;
         "term:fontfamily"?: string;
@@ -822,21 +1278,25 @@ declare global {
         "term:disablewebgl"?: boolean;
         "term:localshellpath"?: string;
         "term:localshellopts"?: string[];
+        "term:gitbashpath"?: string;
         "term:scrollback"?: number;
         "term:copyonselect"?: boolean;
         "term:transparency"?: number;
         "term:allowbracketedpaste"?: boolean;
         "term:shiftenternewline"?: boolean;
+        "term:macoptionismeta"?: boolean;
+        "term:bellsound"?: boolean;
+        "term:bellindicator"?: boolean;
+        "term:durable"?: boolean;
         "editor:minimapenabled"?: boolean;
         "editor:stickyscrollenabled"?: boolean;
         "editor:wordwrap"?: boolean;
         "editor:fontsize"?: number;
+        "editor:inlinediff"?: boolean;
         "web:*"?: boolean;
         "web:openlinksinternally"?: boolean;
         "web:defaulturl"?: string;
         "web:defaultsearch"?: string;
-        "blockheader:*"?: boolean;
-        "blockheader:showblockids"?: boolean;
         "autoupdate:*"?: boolean;
         "autoupdate:enabled"?: boolean;
         "autoupdate:intervalms"?: number;
@@ -849,6 +1309,7 @@ declare global {
         "widget:*"?: boolean;
         "widget:showhelp"?: boolean;
         "window:*"?: boolean;
+        "window:fullscreenonlaunch"?: boolean;
         "window:transparent"?: boolean;
         "window:blur"?: boolean;
         "window:opacity"?: number;
@@ -872,6 +1333,15 @@ declare global {
         "conn:*"?: boolean;
         "conn:askbeforewshinstall"?: boolean;
         "conn:wshenabled"?: boolean;
+        "conn:localhostdisplayname"?: string;
+        "debug:*"?: boolean;
+        "debug:pprofport"?: number;
+        "debug:pprofmemprofilerate"?: number;
+        "tsunami:*"?: boolean;
+        "tsunami:scaffoldpath"?: string;
+        "tsunami:sdkreplacepath"?: string;
+        "tsunami:sdkversion"?: string;
+        "tsunami:gopath"?: string;
     };
 
     // waveobj.StickerClickOptsType
@@ -893,6 +1363,14 @@ declare global {
         style: {[key: string]: any};
         clickopts?: StickerClickOptsType;
         display: StickerDisplayOptsType;
+    };
+
+    // wshrpc.StreamMeta
+    type StreamMeta = {
+        id: string;
+        rwnd: number;
+        readerrouteid: string;
+        writerrouteid: string;
     };
 
     // wps.SubscriptionRequest
@@ -937,6 +1415,8 @@ declare global {
         "client:buildtime"?: string;
         "client:osrelease"?: string;
         "client:isdev"?: boolean;
+        "cohort:month"?: string;
+        "cohort:isoweek"?: string;
         "autoupdate:channel"?: string;
         "autoupdate:enabled"?: boolean;
         "localshell:type"?: string;
@@ -946,22 +1426,33 @@ declare global {
         "settings:customwidgets"?: number;
         "settings:customaipresets"?: number;
         "settings:customsettings"?: number;
+        "settings:customaimodes"?: number;
+        "settings:secretscount"?: number;
+        "settings:transparent"?: boolean;
         "activity:activeminutes"?: number;
         "activity:fgminutes"?: number;
         "activity:openminutes"?: number;
         "activity:waveaiactiveminutes"?: number;
         "activity:waveaifgminutes"?: number;
+        "activity:termcommandsrun"?: number;
+        "activity:termcommands:remote"?: number;
+        "activity:termcommands:durable"?: number;
+        "activity:termcommands:wsl"?: number;
         "app:firstday"?: boolean;
         "app:firstlaunch"?: boolean;
         "action:initiator"?: "keyboard" | "mouse";
+        "action:type"?: string;
         "debug:panictype"?: string;
         "block:view"?: string;
+        "block:controller"?: string;
         "ai:backendtype"?: string;
         "ai:local"?: boolean;
         "wsh:cmd"?: string;
         "wsh:haderror"?: boolean;
         "conn:conntype"?: string;
-        "onboarding:feature"?: "waveai" | "magnify" | "wsh";
+        "conn:wsherrorcode"?: string;
+        "conn:errorcode"?: string;
+        "onboarding:feature"?: "waveai" | "durable" | "magnify" | "wsh";
         "onboarding:version"?: string;
         "onboarding:githubstar"?: "already" | "star" | "later";
         "display:height"?: number;
@@ -975,9 +1466,13 @@ declare global {
         "count:workspaces"?: number;
         "count:sshconn"?: number;
         "count:wslconn"?: number;
+        "count:jobs"?: number;
+        "count:jobsconnected"?: number;
         "count:views"?: {[key: string]: number};
         "waveai:apitype"?: string;
         "waveai:model"?: string;
+        "waveai:chatid"?: string;
+        "waveai:stepnum"?: number;
         "waveai:inputtokens"?: number;
         "waveai:outputtokens"?: number;
         "waveai:nativewebsearchcount"?: number;
@@ -995,7 +1490,14 @@ declare global {
         "waveai:firstbytems"?: number;
         "waveai:requestdurms"?: number;
         "waveai:widgetaccess"?: boolean;
+        "waveai:thinkinglevel"?: string;
+        "waveai:mode"?: string;
+        "waveai:provider"?: string;
+        "waveai:islocal"?: boolean;
         "waveai:feedback"?: "good" | "bad";
+        "waveai:action"?: string;
+        "job:donereason"?: string;
+        "job:kind"?: string;
         $set?: TEventUserProps;
         $set_once?: TEventUserProps;
     };
@@ -1008,6 +1510,8 @@ declare global {
         "client:buildtime"?: string;
         "client:osrelease"?: string;
         "client:isdev"?: boolean;
+        "cohort:month"?: string;
+        "cohort:isoweek"?: string;
         "autoupdate:channel"?: string;
         "autoupdate:enabled"?: boolean;
         "localshell:type"?: string;
@@ -1017,6 +1521,9 @@ declare global {
         "settings:customwidgets"?: number;
         "settings:customaipresets"?: number;
         "settings:customsettings"?: number;
+        "settings:customaimodes"?: number;
+        "settings:secretscount"?: number;
+        "settings:transparent"?: boolean;
     };
 
     // waveobj.Tab
@@ -1024,6 +1531,21 @@ declare global {
         name: string;
         layoutstate: string;
         blockids: string[];
+    };
+
+    // wshrpc.TabIndicator
+    type TabIndicator = {
+        icon: string;
+        color?: string;
+        priority: number;
+        clearonfocus?: boolean;
+        persistentindicator?: TabIndicator;
+    };
+
+    // wshrpc.TabIndicatorEventData
+    type TabIndicatorEventData = {
+        tabid: string;
+        indicator: TabIndicator;
     };
 
     // waveobj.TermSize
@@ -1328,7 +1850,7 @@ declare global {
 
     type WSCommandType = {
         wscommand: string;
-    } & ( SetBlockTermSizeWSCommand | BlockInputWSCommand | WSRpcCommand );
+    } & ( WSRpcCommand );
 
     // eventbus.WSEventType
     type WSEventType = {
@@ -1414,6 +1936,17 @@ declare global {
 
     // filestore.WaveFile
     type WaveFile = {
+        zoneid: string;
+        name: string;
+        opts: FileOpts;
+        createdts: number;
+        size: number;
+        modts: number;
+        meta: {[key: string]: any};
+    };
+
+    // wshrpc.WaveFileInfo
+    type WaveFileInfo = {
         zoneid: string;
         name: string;
         opts: FileOpts;
@@ -1555,7 +2088,6 @@ declare global {
         icon?: string;
         color?: string;
         tabids: string[];
-        pinnedtabids: string[];
         activetabid: string;
     };
 

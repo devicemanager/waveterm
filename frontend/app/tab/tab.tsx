@@ -1,18 +1,26 @@
 // Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { atoms, globalStore, recordTEvent, refocusNode } from "@/app/store/global";
+import {
+    atoms,
+    clearAllTabIndicators,
+    clearTabIndicatorFromFocus,
+    getTabIndicatorAtom,
+    globalStore,
+    recordTEvent,
+    refocusNode,
+    setTabIndicator,
+} from "@/app/store/global";
 import { RpcApi } from "@/app/store/wshclientapi";
 import { TabRpcClient } from "@/app/store/wshrpcutil";
 import { Button } from "@/element/button";
 import { ContextMenuModel } from "@/store/contextmenu";
-import { fireAndForget } from "@/util/util";
+import { fireAndForget, makeIconClass } from "@/util/util";
 import clsx from "clsx";
 import { useAtomValue } from "jotai";
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { ObjectService } from "../store/services";
 import { makeORef, useWaveObjectValue } from "../store/wos";
-import { TabBarModel } from "./tabbar-model";
 import "./tab.scss";
 
 interface TabProps {
@@ -23,39 +31,22 @@ interface TabProps {
     isDragging: boolean;
     tabWidth: number;
     isNew: boolean;
-    isPinned: boolean;
     onSelect: () => void;
     onClose: (event: React.MouseEvent<HTMLButtonElement, MouseEvent> | null) => void;
     onDragStart: (event: React.MouseEvent<HTMLDivElement, MouseEvent>) => void;
     onLoaded: () => void;
-    onPinChange: () => void;
 }
 
 const Tab = memo(
     forwardRef<HTMLDivElement, TabProps>(
         (
-            {
-                id,
-                active,
-                isPinned,
-                isBeforeActive,
-                isDragging,
-                tabWidth,
-                isNew,
-                onLoaded,
-                onSelect,
-                onClose,
-                onDragStart,
-                onPinChange,
-            },
+            { id, active, isBeforeActive, isDragging, tabWidth, isNew, onLoaded, onSelect, onClose, onDragStart },
             ref
         ) => {
             const [tabData, _] = useWaveObjectValue<Tab>(makeORef("tab", id));
             const [originalName, setOriginalName] = useState("");
             const [isEditable, setIsEditable] = useState(false);
-            const [isJiggling, setIsJiggling] = useState(false);
-
-            const jiggleTrigger = useAtomValue(TabBarModel.getInstance().jigglePinAtom);
+            const indicator = useAtomValue(getTabIndicatorAtom(id));
 
             const editableRef = useRef<HTMLDivElement>(null);
             const editableTimeoutRef = useRef<NodeJS.Timeout>(null);
@@ -79,13 +70,15 @@ const Tab = memo(
             }, []);
 
             const selectEditableText = useCallback(() => {
-                if (editableRef.current) {
-                    const range = document.createRange();
-                    const selection = window.getSelection();
-                    range.selectNodeContents(editableRef.current);
-                    selection.removeAllRanges();
-                    selection.addRange(range);
+                if (!editableRef.current) {
+                    return;
                 }
+                editableRef.current.focus();
+                const range = document.createRange();
+                const selection = window.getSelection();
+                range.selectNodeContents(editableRef.current);
+                selection.removeAllRanges();
+                selection.addRange(range);
             }, []);
 
             const handleRenameTab: React.MouseEventHandler<HTMLDivElement> = (event) => {
@@ -93,7 +86,7 @@ const Tab = memo(
                 setIsEditable(true);
                 editableTimeoutRef.current = setTimeout(() => {
                     selectEditableText();
-                }, 0);
+                }, 50);
             };
 
             const handleBlur = () => {
@@ -146,33 +139,45 @@ const Tab = memo(
                 }
             }, [isNew, tabWidth]);
 
-            useEffect(() => {
-                if (active && isPinned && jiggleTrigger > 0) {
-                    setIsJiggling(true);
-                    const timeout = setTimeout(() => {
-                        setIsJiggling(false);
-                    }, 500);
-                    return () => clearTimeout(timeout);
-                }
-            }, [jiggleTrigger, active, isPinned]);
-
             // Prevent drag from being triggered on mousedown
             const handleMouseDownOnClose = (event: React.MouseEvent<HTMLButtonElement, MouseEvent>) => {
                 event.stopPropagation();
             };
 
+            const handleTabClick = () => {
+                const currentIndicator = globalStore.get(getTabIndicatorAtom(id));
+                if (currentIndicator?.clearonfocus) {
+                    clearTabIndicatorFromFocus(id);
+                }
+                onSelect();
+            };
+
             const handleContextMenu = useCallback(
                 (e: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
                     e.preventDefault();
-                    let menu: ContextMenuItem[] = [
-                        { label: isPinned ? "Unpin Tab" : "Pin Tab", click: () => onPinChange() },
+                    let menu: ContextMenuItem[] = [];
+                    const currentIndicator = globalStore.get(getTabIndicatorAtom(id));
+                    if (currentIndicator) {
+                        menu.push(
+                            {
+                                label: "Clear Tab Indicator",
+                                click: () => setTabIndicator(id, null),
+                            },
+                            {
+                                label: "Clear All Indicators",
+                                click: () => clearAllTabIndicators(),
+                            },
+                            { type: "separator" }
+                        );
+                    }
+                    menu.push(
                         { label: "Rename Tab", click: () => handleRenameTab(null) },
                         {
                             label: "Copy TabId",
                             click: () => fireAndForget(() => navigator.clipboard.writeText(id)),
                         },
-                        { type: "separator" },
-                    ];
+                        { type: "separator" }
+                    );
                     const fullConfig = globalStore.get(atoms.fullConfigAtom);
                     const bgPresets: string[] = [];
                     for (const key in fullConfig?.presets ?? {}) {
@@ -208,7 +213,7 @@ const Tab = memo(
                     menu.push({ label: "Close Tab", click: () => onClose(null) });
                     ContextMenuModel.showContextMenu(menu, e);
                 },
-                [onPinChange, handleRenameTab, id, onClose, isPinned]
+                [handleRenameTab, id, onClose]
             );
 
             return (
@@ -221,7 +226,7 @@ const Tab = memo(
                         "new-tab": isNew,
                     })}
                     onMouseDown={onDragStart}
-                    onClick={onSelect}
+                    onClick={handleTabClick}
                     onContextMenu={handleContextMenu}
                     data-tab-id={id}
                 >
@@ -237,27 +242,23 @@ const Tab = memo(
                         >
                             {tabData?.name}
                         </div>
-                        {isPinned ? (
-                            <Button
-                                className={clsx("ghost grey pin", { jiggling: isJiggling })}
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    onPinChange();
-                                }}
-                                title="Unpin Tab"
+                        {indicator && (
+                            <div
+                                className="tab-indicator pointer-events-none"
+                                style={{ color: indicator.color || "#fbbf24" }}
+                                title="Activity notification"
                             >
-                                <i className="fa fa-solid fa-thumbtack" />
-                            </Button>
-                        ) : (
-                            <Button
-                                className="ghost grey close"
-                                onClick={onClose}
-                                onMouseDown={handleMouseDownOnClose}
-                                title="Close Tab"
-                            >
-                                <i className="fa fa-solid fa-xmark" />
-                            </Button>
+                                <i className={makeIconClass(indicator.icon, true, { defaultIcon: "bell" })} />
+                            </div>
                         )}
+                        <Button
+                            className="ghost grey close"
+                            onClick={onClose}
+                            onMouseDown={handleMouseDownOnClose}
+                            title="Close Tab"
+                        >
+                            <i className="fa fa-solid fa-xmark" />
+                        </Button>
                     </div>
                 </div>
             );

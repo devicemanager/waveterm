@@ -5,13 +5,11 @@ package aiusechat
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
-	"time"
 
 	"github.com/wavetermdev/waveterm/pkg/aiusechat/uctypes"
+	"github.com/wavetermdev/waveterm/pkg/util/fileutil"
 	"github.com/wavetermdev/waveterm/pkg/util/utilfn"
 	"github.com/wavetermdev/waveterm/pkg/wavebase"
 )
@@ -22,16 +20,6 @@ const ReadDirHardMaxEntries = 10000
 type readDirParams struct {
 	Path       string `json:"path"`
 	MaxEntries *int   `json:"max_entries"`
-}
-
-type DirEntryOut struct {
-	Name         string `json:"name"`
-	Dir          bool   `json:"dir,omitempty"`
-	Symlink      bool   `json:"symlink,omitempty"`
-	Size         int64  `json:"size,omitempty"`
-	Mode         string `json:"mode"`
-	Modified     string `json:"modified"`
-	ModifiedTime string `json:"modified_time"`
 }
 
 func parseReadDirInput(input any) (*readDirParams, error) {
@@ -65,7 +53,34 @@ func parseReadDirInput(input any) (*readDirParams, error) {
 	return result, nil
 }
 
-func readDirCallback(input any) (any, error) {
+func verifyReadDirInput(input any, toolUseData *uctypes.UIMessageDataToolUse) error {
+	params, err := parseReadDirInput(input)
+	if err != nil {
+		return err
+	}
+
+	expandedPath, err := wavebase.ExpandHomeDir(params.Path)
+	if err != nil {
+		return fmt.Errorf("failed to expand path: %w", err)
+	}
+
+	if !filepath.IsAbs(expandedPath) {
+		return fmt.Errorf("path must be absolute, got relative path: %s", params.Path)
+	}
+
+	fileInfo, err := os.Stat(expandedPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat path: %w", err)
+	}
+
+	if !fileInfo.IsDir() {
+		return fmt.Errorf("path is not a directory, cannot be read with the read_dir tool. use the read_text_file tool if available to read files")
+	}
+
+	return nil
+}
+
+func readDirCallback(input any, toolUseData *uctypes.UIMessageDataToolUse) (any, error) {
 	params, err := parseReadDirInput(input)
 	if err != nil {
 		return nil, err
@@ -76,108 +91,33 @@ func readDirCallback(input any) (any, error) {
 		return nil, fmt.Errorf("failed to expand path: %w", err)
 	}
 
-	fileInfo, err := os.Stat(expandedPath)
+	if !filepath.IsAbs(expandedPath) {
+		return nil, fmt.Errorf("path must be absolute, got relative path: %s", params.Path)
+	}
+
+	result, err := fileutil.ReadDir(params.Path, *params.MaxEntries)
 	if err != nil {
-		return nil, fmt.Errorf("failed to stat path: %w", err)
+		return nil, err
 	}
 
-	if !fileInfo.IsDir() {
-		return nil, fmt.Errorf("path is not a directory, cannot be read with the read_dir tool. use the read_text_file tool to read files")
+	resultMap := map[string]any{
+		"path":          result.Path,
+		"absolute_path": result.AbsolutePath,
+		"entry_count":   result.EntryCount,
+		"total_entries": result.TotalEntries,
+		"entries":       result.Entries,
 	}
 
-	entries, err := os.ReadDir(expandedPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read directory: %w", err)
+	if result.Truncated {
+		resultMap["truncated"] = true
+		resultMap["truncated_message"] = fmt.Sprintf("Directory listing truncated to %d entries (out of %d total). Increase max_entries to see more.", result.EntryCount, result.TotalEntries)
 	}
 
-	// Keep track of the original total before truncation
-	totalEntries := len(entries)
-
-	// Build a map of actual directory status, checking symlink targets
-	isDirMap := make(map[string]bool)
-	symlinkCount := 0
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.Type()&fs.ModeSymlink != 0 {
-			if symlinkCount < 1000 {
-				symlinkCount++
-				fullPath := filepath.Join(expandedPath, name)
-				if info, err := os.Stat(fullPath); err == nil {
-					isDirMap[name] = info.IsDir()
-				} else {
-					isDirMap[name] = entry.IsDir()
-				}
-			} else {
-				isDirMap[name] = entry.IsDir()
-			}
-		} else {
-			isDirMap[name] = entry.IsDir()
-		}
+	if result.ParentDir != "" {
+		resultMap["parent_dir"] = result.ParentDir
 	}
 
-	// Sort entries: directories first, then files, alphabetically within each group
-	sort.Slice(entries, func(i, j int) bool {
-		iIsDir := isDirMap[entries[i].Name()]
-		jIsDir := isDirMap[entries[j].Name()]
-		if iIsDir != jIsDir {
-			return iIsDir
-		}
-		return entries[i].Name() < entries[j].Name()
-	})
-
-	// Truncate after sorting to ensure directories come first
-	maxEntries := *params.MaxEntries
-	var truncated bool
-	if len(entries) > maxEntries {
-		entries = entries[:maxEntries]
-		truncated = true
-	}
-
-	var entryList []DirEntryOut
-	for _, entry := range entries {
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-
-		isDir := isDirMap[entry.Name()]
-		isSymlink := entry.Type()&fs.ModeSymlink != 0
-
-		entryData := DirEntryOut{
-			Name:         entry.Name(),
-			Dir:          isDir,
-			Symlink:      isSymlink,
-			Mode:         info.Mode().String(),
-			Modified:     utilfn.FormatRelativeTime(info.ModTime()),
-			ModifiedTime: info.ModTime().UTC().Format(time.RFC3339),
-		}
-
-		if !isDir {
-			entryData.Size = info.Size()
-		}
-
-		entryList = append(entryList, entryData)
-	}
-
-	result := map[string]any{
-		"path":          params.Path,
-		"absolute_path": expandedPath,
-		"entry_count":   len(entryList),
-		"total_entries": totalEntries,
-		"entries":       entryList,
-	}
-
-	if truncated {
-		result["truncated"] = true
-		result["truncated_message"] = fmt.Sprintf("Directory listing truncated to %d entries (out of %d total). Increase max_entries to see more.", len(entryList), totalEntries)
-	}
-
-	parentDir := filepath.Dir(expandedPath)
-	if parentDir != expandedPath {
-		result["parent_dir"] = parentDir
-	}
-
-	return result, nil
+	return resultMap, nil
 }
 
 func GetReadDirToolDefinition() uctypes.ToolDefinition {
@@ -192,7 +132,7 @@ func GetReadDirToolDefinition() uctypes.ToolDefinition {
 			"properties": map[string]any{
 				"path": map[string]any{
 					"type":        "string",
-					"description": "Path to the directory to read. Supports '~' for the user's home directory.",
+					"description": "Absolute path to the directory to read. Supports '~' for the user's home directory. Relative paths are not supported.",
 				},
 				"max_entries": map[string]any{
 					"type":        "integer",
@@ -205,10 +145,22 @@ func GetReadDirToolDefinition() uctypes.ToolDefinition {
 			"required":             []string{"path"},
 			"additionalProperties": false,
 		},
-		ToolInputDesc: func(input any) string {
+		ToolCallDesc: func(input any, output any, toolUseData *uctypes.UIMessageDataToolUse) string {
 			parsed, err := parseReadDirInput(input)
 			if err != nil {
 				return fmt.Sprintf("error parsing input: %v", err)
+			}
+
+			readFullDir := false
+			if output != nil {
+				if outputMap, ok := output.(map[string]any); ok {
+					_, wasTruncated := outputMap["truncated"]
+					readFullDir = !wasTruncated
+				}
+			}
+
+			if readFullDir {
+				return fmt.Sprintf("reading directory %q (entire directory)", parsed.Path)
 			}
 			return fmt.Sprintf("reading directory %q (max_entries: %d)", parsed.Path, *parsed.MaxEntries)
 		},
@@ -216,5 +168,6 @@ func GetReadDirToolDefinition() uctypes.ToolDefinition {
 		ToolApproval: func(input any) string {
 			return uctypes.ApprovalNeedsApproval
 		},
+		ToolVerifyInput: verifyReadDirInput,
 	}
 }

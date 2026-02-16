@@ -1,27 +1,29 @@
 // Copyright 2025, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+import { handleWaveAIContextMenu } from "@/app/aipanel/aipanel-contextmenu";
 import { waveAIHasSelection } from "@/app/aipanel/waveai-focus-utils";
 import { ErrorBoundary } from "@/app/element/errorboundary";
-import { ContextMenuModel } from "@/app/store/contextmenu";
-import { focusManager } from "@/app/store/focusManager";
 import { atoms, getSettingsKeyAtom } from "@/app/store/global";
 import { globalStore } from "@/app/store/jotaiStore";
-import { WorkspaceLayoutModel } from "@/app/workspace/workspace-layout-model";
-import { getWebServerEndpoint } from "@/util/endpoints";
+import { maybeUseTabModel } from "@/app/store/tab-model";
 import { checkKeyPressed, keydownWrapper } from "@/util/keyutil";
-import { isMacOS } from "@/util/platformutil";
+import { isMacOS, isWindows } from "@/util/platformutil";
 import { cn } from "@/util/util";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import * as jotai from "jotai";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { useDrop } from "react-dnd";
 import { formatFileSizeError, isAcceptableFile, validateFileSize } from "./ai-utils";
 import { AIDroppedFiles } from "./aidroppedfiles";
+import { AIModeDropdown } from "./aimode";
 import { AIPanelHeader } from "./aipanelheader";
 import { AIPanelInput } from "./aipanelinput";
 import { AIPanelMessages } from "./aipanelmessages";
 import { AIRateLimitStrip } from "./airatelimitstrip";
+import { WaveUIMessage } from "./aitypes";
+import { BYOKAnnouncement } from "./byokannouncement";
 import { TelemetryRequiredMessage } from "./telemetryrequired";
 import { WaveAIModel } from "./waveai-model";
 
@@ -70,7 +72,7 @@ const KeyCap = memo(({ children, className }: { children: React.ReactNode; class
     return (
         <kbd
             className={cn(
-                "px-1.5 py-0.5 text-xs bg-gray-700 border border-gray-600 rounded-sm shadow-sm font-mono",
+                "px-1.5 py-0.5 text-xs bg-zinc-700 border border-zinc-600 rounded-sm shadow-sm font-mono",
                 className
             )}
         >
@@ -83,10 +85,12 @@ KeyCap.displayName = "KeyCap";
 
 const AIWelcomeMessage = memo(() => {
     const modKey = isMacOS() ? "⌘" : "Alt";
+    const aiModeConfigs = jotai.useAtomValue(atoms.waveaiModeConfigAtom);
+    const hasCustomModes = Object.keys(aiModeConfigs).some((key) => !key.startsWith("waveai@"));
     return (
         <div className="text-secondary py-8">
             <div className="text-center">
-                <i className="fa fa-sparkles text-4xl text-accent mb-4 block"></i>
+                <i className="fa fa-sparkles text-4xl text-accent mb-2 block"></i>
                 <p className="text-lg font-bold text-primary">Welcome to Wave AI</p>
             </div>
             <div className="mt-4 text-left max-w-md mx-auto">
@@ -130,10 +134,20 @@ const AIWelcomeMessage = memo(() => {
                                     <span className="ml-1.5">to toggle panel</span>
                                 </div>
                                 <div>
-                                    <KeyCap>Ctrl</KeyCap>
-                                    <KeyCap className="ml-1">Shift</KeyCap>
-                                    <KeyCap className="ml-1">0</KeyCap>
-                                    <span className="ml-1.5">to focus</span>
+                                    {isWindows() ? (
+                                        <>
+                                            <KeyCap>Alt</KeyCap>
+                                            <KeyCap className="ml-1">0</KeyCap>
+                                            <span className="ml-1.5">to focus</span>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <KeyCap>Ctrl</KeyCap>
+                                            <KeyCap className="ml-1">Shift</KeyCap>
+                                            <KeyCap className="ml-1">0</KeyCap>
+                                            <span className="ml-1.5">to focus</span>
+                                        </>
+                                    )}
                                 </div>
                             </div>
                         </div>
@@ -155,6 +169,7 @@ const AIWelcomeMessage = memo(() => {
                         </div>
                     </div>
                 </div>
+                {!hasCustomModes && <BYOKAnnouncement />}
                 <div className="mt-4 text-center text-[12px] text-muted">
                     BETA: Free to use. Daily limits keep our costs in check.
                 </div>
@@ -165,80 +180,121 @@ const AIWelcomeMessage = memo(() => {
 
 AIWelcomeMessage.displayName = "AIWelcomeMessage";
 
-interface AIErrorMessageProps {
-    errorMessage: string;
-    onClear: () => void;
-}
+const AIBuilderWelcomeMessage = memo(() => {
+    return (
+        <div className="text-secondary py-8">
+            <div className="text-center">
+                <i className="fa fa-sparkles text-4xl text-accent mb-4 block"></i>
+                <p className="text-lg font-bold text-primary">WaveApp Builder</p>
+            </div>
+            <div className="mt-4 text-left max-w-md mx-auto">
+                <p className="text-sm mb-6">
+                    The WaveApp builder helps create wave widgets that integrate seamlessly into Wave Terminal.
+                </p>
+            </div>
+        </div>
+    );
+});
 
-const AIErrorMessage = memo(({ errorMessage, onClear }: AIErrorMessageProps) => {
+AIBuilderWelcomeMessage.displayName = "AIBuilderWelcomeMessage";
+
+const AIErrorMessage = memo(() => {
+    const model = WaveAIModel.getInstance();
+    const errorMessage = jotai.useAtomValue(model.errorMessage);
+
+    if (!errorMessage) {
+        return null;
+    }
+
     return (
         <div className="px-4 py-2 text-red-400 bg-red-900/20 border-l-4 border-red-500 mx-2 mb-2 relative">
             <button
-                onClick={onClear}
+                onClick={() => model.clearError()}
                 className="absolute top-2 right-2 text-red-400 hover:text-red-300 cursor-pointer z-10"
                 aria-label="Close error"
             >
                 <i className="fa fa-times text-sm"></i>
             </button>
-            <div className="text-sm pr-6 max-h-[100px] overflow-y-auto">{errorMessage}</div>
+            <div className="text-sm pr-6 max-h-[100px] overflow-y-auto">
+                {errorMessage}
+                <button
+                    onClick={() => model.clearChat()}
+                    className="ml-2 text-xs text-red-300 hover:text-red-200 cursor-pointer underline"
+                >
+                    New Chat
+                </button>
+            </div>
         </div>
     );
 });
 
 AIErrorMessage.displayName = "AIErrorMessage";
 
-interface AIPanelProps {
-    className?: string;
-    onClose?: () => void;
-}
+const ConfigChangeModeFixer = memo(() => {
+    const model = WaveAIModel.getInstance();
+    const telemetryEnabled = jotai.useAtomValue(getSettingsKeyAtom("telemetry:enabled")) ?? false;
+    const aiModeConfigs = jotai.useAtomValue(model.aiModeConfigs);
 
-const AIPanelComponentInner = memo(({ className, onClose }: AIPanelProps) => {
+    useEffect(() => {
+        model.fixModeAfterConfigChange();
+    }, [telemetryEnabled, aiModeConfigs, model]);
+
+    return null;
+});
+
+ConfigChangeModeFixer.displayName = "ConfigChangeModeFixer";
+
+const AIPanelComponentInner = memo(() => {
     const [isDragOver, setIsDragOver] = useState(false);
+    const [isReactDndDragOver, setIsReactDndDragOver] = useState(false);
     const [initialLoadDone, setInitialLoadDone] = useState(false);
     const model = WaveAIModel.getInstance();
     const containerRef = useRef<HTMLDivElement>(null);
-    const errorMessage = jotai.useAtomValue(model.errorMessage);
     const isLayoutMode = jotai.useAtomValue(atoms.controlShiftDelayAtom);
     const showOverlayBlockNums = jotai.useAtomValue(getSettingsKeyAtom("app:showoverlayblocknums")) ?? true;
-    const focusType = jotai.useAtomValue(focusManager.focusType);
-    const isFocused = focusType === "waveai";
+    const isFocused = jotai.useAtomValue(model.isWaveAIFocusedAtom);
     const telemetryEnabled = jotai.useAtomValue(getSettingsKeyAtom("telemetry:enabled")) ?? false;
-    const isPanelVisible = jotai.useAtomValue(WorkspaceLayoutModel.getInstance().panelVisibleAtom);
+    const isPanelVisible = jotai.useAtomValue(model.getPanelVisibleAtom());
+    const tabModel = maybeUseTabModel();
+    const defaultMode = jotai.useAtomValue(getSettingsKeyAtom("waveai:defaultmode")) ?? "waveai@balanced";
+    const aiModeConfigs = jotai.useAtomValue(model.aiModeConfigs);
 
-    const { messages, sendMessage, status, setMessages, error, stop } = useChat({
+    const hasCustomModes = Object.keys(aiModeConfigs).some((key) => !key.startsWith("waveai@"));
+    const isUsingCustomMode = !defaultMode.startsWith("waveai@");
+    const allowAccess = telemetryEnabled || (hasCustomModes && isUsingCustomMode);
+
+    const { messages, sendMessage, status, setMessages, error, stop } = useChat<WaveUIMessage>({
         transport: new DefaultChatTransport({
-            api: `${getWebServerEndpoint()}/api/post-chat-message`,
+            api: model.getUseChatEndpointUrl(),
             prepareSendMessagesRequest: (opts) => {
                 const msg = model.getAndClearMessage();
-                return {
-                    body: {
-                        msg,
-                        chatid: globalStore.get(model.chatId),
-                        widgetaccess: globalStore.get(model.widgetAccessAtom),
-                        tabid: globalStore.get(atoms.staticTabId),
-                    },
+                const windowType = globalStore.get(atoms.waveWindowType);
+                const body: any = {
+                    msg,
+                    chatid: globalStore.get(model.chatId),
+                    widgetaccess: globalStore.get(model.widgetAccessAtom),
+                    aimode: globalStore.get(model.currentAIMode),
                 };
+                if (windowType === "builder") {
+                    body.builderid = globalStore.get(atoms.builderId);
+                    body.builderappid = globalStore.get(atoms.builderAppId);
+                } else {
+                    body.tabid = tabModel.tabId;
+                }
+                return { body };
             },
         }),
         onError: (error) => {
             console.error("AI Chat error:", error);
             model.setError(error.message || "An error occurred");
-            setMessages((prevMessages) => {
-                if (prevMessages.length > 0 && prevMessages[prevMessages.length - 1].role === "user") {
-                    return prevMessages.slice(0, -1);
-                }
-                return prevMessages;
-            });
         },
     });
 
     model.registerUseChatData(sendMessage, setMessages, status, stop);
 
     // console.log("AICHAT messages", messages);
-
-    const handleClearChat = useCallback(() => {
-        model.clearChat();
-    }, [model]);
+    (window as any).aichatmessages = messages;
+    (window as any).aichatstatus = status;
 
     const handleKeyDown = (waveEvent: WaveKeyboardEvent): boolean => {
         if (checkKeyPressed(waveEvent, "Cmd:k")) {
@@ -247,6 +303,10 @@ const AIPanelComponentInner = memo(({ className, onClose }: AIPanelProps) => {
         }
         return false;
     };
+
+    useEffect(() => {
+        globalStore.set(model.isAIStreaming, status == "streaming");
+    }, [status]);
 
     useEffect(() => {
         const keyHandler = keydownWrapper(handleKeyDown);
@@ -258,7 +318,7 @@ const AIPanelComponentInner = memo(({ className, onClose }: AIPanelProps) => {
 
     useEffect(() => {
         const loadChat = async () => {
-            await model.uiLoadChat();
+            await model.uiLoadInitialChat();
             setInitialLoadDone(true);
         };
         loadChat();
@@ -301,27 +361,55 @@ const AIPanelComponentInner = memo(({ className, onClose }: AIPanelProps) => {
     };
 
     const handleDragOver = (e: React.DragEvent) => {
+        if (!allowAccess) {
+            return;
+        }
+
+        const hasFiles = hasFilesDragged(e.dataTransfer);
+
+        // Only handle native file drags here, let react-dnd handle FILE_ITEM drags
+        if (!hasFiles) {
+            return;
+        }
+
         e.preventDefault();
         e.stopPropagation();
 
-        const hasFiles = hasFilesDragged(e.dataTransfer);
-        if (hasFiles && !isDragOver) {
+        if (!isDragOver) {
             setIsDragOver(true);
-        } else if (!hasFiles && isDragOver) {
-            setIsDragOver(false);
         }
     };
 
     const handleDragEnter = (e: React.DragEvent) => {
+        if (!allowAccess) {
+            return;
+        }
+
+        const hasFiles = hasFilesDragged(e.dataTransfer);
+
+        // Only handle native file drags here, let react-dnd handle FILE_ITEM drags
+        if (!hasFiles) {
+            return;
+        }
+
         e.preventDefault();
         e.stopPropagation();
 
-        if (hasFilesDragged(e.dataTransfer)) {
-            setIsDragOver(true);
-        }
+        setIsDragOver(true);
     };
 
     const handleDragLeave = (e: React.DragEvent) => {
+        if (!allowAccess) {
+            return;
+        }
+
+        const hasFiles = hasFilesDragged(e.dataTransfer);
+
+        // Only handle native file drags here, let react-dnd handle FILE_ITEM drags
+        if (!hasFiles) {
+            return;
+        }
+
         e.preventDefault();
         e.stopPropagation();
 
@@ -336,6 +424,19 @@ const AIPanelComponentInner = memo(({ className, onClose }: AIPanelProps) => {
     };
 
     const handleDrop = async (e: React.DragEvent) => {
+        if (!allowAccess) {
+            e.preventDefault();
+            e.stopPropagation();
+            setIsDragOver(false);
+            return;
+        }
+
+        // Check if this is a FILE_ITEM drag from react-dnd
+        // If so, let react-dnd handle it instead
+        if (!e.dataTransfer.files.length) {
+            return; // Let react-dnd handle FILE_ITEM drags
+        }
+
         e.preventDefault();
         e.stopPropagation();
         setIsDragOver(false);
@@ -362,10 +463,51 @@ const AIPanelComponentInner = memo(({ className, onClose }: AIPanelProps) => {
         }
     };
 
-    const handleFocusCapture = useCallback((event: React.FocusEvent) => {
-        // console.log("Wave AI focus capture", getElemAsStr(event.target));
-        focusManager.requestWaveAIFocus();
-    }, []);
+    const handleFileItemDrop = useCallback(
+        (draggedFile: DraggedFile) => {
+            if (!allowAccess) {
+                return;
+            }
+            model.addFileFromRemoteUri(draggedFile);
+        },
+        [model, allowAccess]
+    );
+
+    const [{ isOver, canDrop }, drop] = useDrop(
+        () => ({
+            accept: "FILE_ITEM",
+            drop: handleFileItemDrop,
+            collect: (monitor) => ({
+                isOver: monitor.isOver(),
+                canDrop: monitor.canDrop(),
+            }),
+        }),
+        [handleFileItemDrop]
+    );
+
+    // Update drag over state for FILE_ITEM drags
+    useEffect(() => {
+        if (isOver && canDrop) {
+            setIsReactDndDragOver(true);
+        } else {
+            setIsReactDndDragOver(false);
+        }
+    }, [isOver, canDrop]);
+
+    // Attach the drop ref to the container
+    useEffect(() => {
+        if (containerRef.current) {
+            drop(containerRef.current);
+        }
+    }, [drop]);
+
+    const handleFocusCapture = useCallback(
+        (event: React.FocusEvent) => {
+            // console.log("Wave AI focus capture", getElemAsStr(event.target));
+            model.requestWaveAIFocus();
+        },
+        [model]
+    );
 
     const handleClick = (e: React.MouseEvent) => {
         const target = e.target as HTMLElement;
@@ -377,7 +519,7 @@ const AIPanelComponentInner = memo(({ className, onClose }: AIPanelProps) => {
 
         const hasSelection = waveAIHasSelection();
         if (hasSelection) {
-            focusManager.requestWaveAIFocus();
+            model.requestWaveAIFocus();
             return;
         }
 
@@ -388,39 +530,6 @@ const AIPanelComponentInner = memo(({ className, onClose }: AIPanelProps) => {
         }, 0);
     };
 
-    const handleMessagesContextMenu = (e: React.MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        const menu: ContextMenuItem[] = [];
-
-        const hasSelection = waveAIHasSelection();
-        if (hasSelection) {
-            menu.push({
-                role: "copy",
-            });
-            menu.push({ type: "separator" });
-        }
-
-        menu.push({
-            label: "New Chat",
-            click: () => {
-                model.clearChat();
-            },
-        });
-
-        menu.push({ type: "separator" });
-
-        menu.push({
-            label: "Hide Wave AI",
-            click: () => {
-                onClose?.();
-            },
-        });
-
-        ContextMenuModel.showContextMenu(menu, e);
-    };
-
     const showBlockMask = isLayoutMode && showOverlayBlockNums;
 
     return (
@@ -428,14 +537,14 @@ const AIPanelComponentInner = memo(({ className, onClose }: AIPanelProps) => {
             ref={containerRef}
             data-waveai-panel="true"
             className={cn(
-                "bg-gray-900 flex flex-col relative h-[calc(100%-4px)] mt-1",
-                className,
-                isDragOver && "bg-gray-800 border-accent",
+                "@container bg-zinc-900/70 flex flex-col relative",
+                model.inBuilder ? "mt-0 h-full" : "mt-1 h-[calc(100%-4px)]",
+                (isDragOver || isReactDndDragOver) && "bg-zinc-800 border-accent",
                 isFocused ? "border-2 border-accent" : "border-2 border-transparent"
             )}
             style={{
-                borderTopRightRadius: 10,
-                borderBottomRightRadius: 10,
+                borderTopRightRadius: model.inBuilder ? 0 : 10,
+                borderBottomRightRadius: model.inBuilder ? 0 : 10,
                 borderBottomLeftRadius: 10,
             }}
             onFocusCapture={handleFocusCapture}
@@ -446,30 +555,35 @@ const AIPanelComponentInner = memo(({ className, onClose }: AIPanelProps) => {
             onClick={handleClick}
             inert={!isPanelVisible ? true : undefined}
         >
-            {isDragOver && <AIDragOverlay />}
+            <ConfigChangeModeFixer />
+            {(isDragOver || isReactDndDragOver) && allowAccess && <AIDragOverlay />}
             {showBlockMask && <AIBlockMask />}
-            <AIPanelHeader onClose={onClose} model={model} onClearChat={handleClearChat} />
+            <AIPanelHeader />
             <AIRateLimitStrip />
 
             <div key="main-content" className="flex-1 flex flex-col min-h-0">
-                {!telemetryEnabled ? (
+                {!allowAccess ? (
                     <TelemetryRequiredMessage />
                 ) : (
                     <>
                         {messages.length === 0 && initialLoadDone ? (
-                            <div className="flex-1 overflow-y-auto p-2" onContextMenu={handleMessagesContextMenu}>
-                                <AIWelcomeMessage />
+                            <div
+                                className="flex-1 overflow-y-auto p-2 relative"
+                                onContextMenu={(e) => handleWaveAIContextMenu(e, true)}
+                            >
+                                <div className="absolute top-2 left-2 z-10">
+                                    <AIModeDropdown />
+                                </div>
+                                {model.inBuilder ? <AIBuilderWelcomeMessage /> : <AIWelcomeMessage />}
                             </div>
                         ) : (
                             <AIPanelMessages
                                 messages={messages}
                                 status={status}
-                                onContextMenu={handleMessagesContextMenu}
+                                onContextMenu={(e) => handleWaveAIContextMenu(e, true)}
                             />
                         )}
-                        {errorMessage && (
-                            <AIErrorMessage errorMessage={errorMessage} onClear={() => model.clearError()} />
-                        )}
+                        <AIErrorMessage />
                         <AIDroppedFiles model={model} />
                         <AIPanelInput onSubmit={handleSubmit} status={status} model={model} />
                     </>
@@ -481,10 +595,10 @@ const AIPanelComponentInner = memo(({ className, onClose }: AIPanelProps) => {
 
 AIPanelComponentInner.displayName = "AIPanelInner";
 
-const AIPanelComponent = ({ className, onClose }: AIPanelProps) => {
+const AIPanelComponent = () => {
     return (
         <ErrorBoundary>
-            <AIPanelComponentInner className={className} onClose={onClose} />
+            <AIPanelComponentInner />
         </ErrorBoundary>
     );
 };

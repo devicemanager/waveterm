@@ -29,10 +29,12 @@ const (
 	WaveConfigHomeEnvVar           = "WAVETERM_CONFIG_HOME"
 	WaveDataHomeEnvVar             = "WAVETERM_DATA_HOME"
 	WaveAppPathVarName             = "WAVETERM_APP_PATH"
+	WaveAppResourcesPathVarName    = "WAVETERM_RESOURCES_PATH"
 	WaveAppElectronExecPathVarName = "WAVETERM_ELECTRONEXECPATH"
 	WaveDevVarName                 = "WAVETERM_DEV"
 	WaveDevViteVarName             = "WAVETERM_DEV_VITE"
 	WaveWshForceUpdateVarName      = "WAVETERM_WSHFORCEUPDATE"
+	WaveNoConfirmQuitVarName       = "WAVETERM_NOCONFIRMQUIT"
 
 	WaveJwtTokenVarName  = "WAVETERM_JWT"
 	WaveSwapTokenVarName = "WAVETERM_SWAPTOKEN"
@@ -50,6 +52,7 @@ const NeedJwtConst = "NEED-JWT"
 var ConfigHome_VarCache string          // caches WAVETERM_CONFIG_HOME
 var DataHome_VarCache string            // caches WAVETERM_DATA_HOME
 var AppPath_VarCache string             // caches WAVETERM_APP_PATH
+var AppResourcesPath_VarCache string    // caches WAVETERM_RESOURCES_PATH
 var AppElectronExecPath_VarCache string // caches WAVETERM_ELECTRONEXECPATH
 var Dev_VarCache string                 // caches WAVETERM_DEV
 
@@ -57,7 +60,6 @@ const WaveLockFile = "wave.lock"
 const DomainSocketBaseName = "wave.sock"
 const RemoteDomainSocketBaseName = "wave-remote.sock"
 const WaveDBDir = "db"
-const JwtSecret = "waveterm" // TODO generate and store this
 const ConfigDir = "config"
 const RemoteWaveHomeDirName = ".waveterm"
 const RemoteWshBinDirName = "bin"
@@ -68,6 +70,9 @@ const AppPathBinDir = "bin"
 
 var baseLock = &sync.Mutex{}
 var ensureDirCache = map[string]bool{}
+
+var waveCachesDirOnce = &sync.Once{}
+var waveCachesDir string
 
 var SupportedWshBinaries = map[string]bool{
 	"darwin-x64":    true,
@@ -95,11 +100,14 @@ func CacheAndRemoveEnvVars() error {
 	os.Unsetenv(WaveDataHomeEnvVar)
 	AppPath_VarCache = os.Getenv(WaveAppPathVarName)
 	os.Unsetenv(WaveAppPathVarName)
+	AppResourcesPath_VarCache = os.Getenv(WaveAppResourcesPathVarName)
+	os.Unsetenv(WaveAppResourcesPathVarName)
 	AppElectronExecPath_VarCache = os.Getenv(WaveAppElectronExecPathVarName)
 	os.Unsetenv(WaveAppElectronExecPathVarName)
 	Dev_VarCache = os.Getenv(WaveDevVarName)
 	os.Unsetenv(WaveDevVarName)
 	os.Unsetenv(WaveDevViteVarName)
+	os.Unsetenv(WaveNoConfirmQuitVarName)
 	return nil
 }
 
@@ -109,6 +117,10 @@ func IsDevMode() bool {
 
 func GetWaveAppPath() string {
 	return AppPath_VarCache
+}
+
+func GetWaveAppResourcesPath() string {
+	return AppResourcesPath_VarCache
 }
 
 func GetWaveDataDir() string {
@@ -171,6 +183,12 @@ func GetDomainSocketName() string {
 	return filepath.Join(GetWaveDataDir(), DomainSocketBaseName)
 }
 
+// returns a Unix-style path for the remote socket (using fmt.Sprintf instead of filepath.Join
+// because this path is for a remote Unix system, not the local OS which might be Windows)
+func GetPersistentRemoteSockName(clientId string) string {
+	return fmt.Sprintf("~/.waveterm/client/%s/waveterm.sock", clientId)
+}
+
 func EnsureWaveDataDir() error {
 	return CacheEnsureDir(GetWaveDataDir(), "wavehome", 0700, "wave home directory")
 }
@@ -185,6 +203,51 @@ func EnsureWaveConfigDir() error {
 
 func EnsureWavePresetsDir() error {
 	return CacheEnsureDir(filepath.Join(GetWaveConfigDir(), "presets"), "wavepresets", 0700, "wave presets directory")
+}
+
+func resolveWaveCachesDir() string {
+	var cacheDir string
+	appBundle := "waveterm"
+	if IsDevMode() {
+		appBundle = "waveterm-dev"
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		homeDir := GetHomeDir()
+		cacheDir = filepath.Join(homeDir, "Library", "Caches", appBundle)
+	case "linux":
+		xdgCache := os.Getenv("XDG_CACHE_HOME")
+		if xdgCache != "" {
+			cacheDir = filepath.Join(xdgCache, appBundle)
+		} else {
+			homeDir := GetHomeDir()
+			cacheDir = filepath.Join(homeDir, ".cache", appBundle)
+		}
+	case "windows":
+		localAppData := os.Getenv("LOCALAPPDATA")
+		if localAppData != "" {
+			cacheDir = filepath.Join(localAppData, appBundle, "Cache")
+		}
+	}
+
+	if cacheDir == "" {
+		tmpDir := os.TempDir()
+		cacheDir = filepath.Join(tmpDir, appBundle)
+	}
+
+	return cacheDir
+}
+
+func GetWaveCachesDir() string {
+	waveCachesDirOnce.Do(func() {
+		waveCachesDir = resolveWaveCachesDir()
+	})
+	return waveCachesDir
+}
+
+func EnsureWaveCachesDir() error {
+	return CacheEnsureDir(GetWaveCachesDir(), "wavecaches", 0700, "wave caches directory")
 }
 
 func CacheEnsureDir(dirName string, cacheKey string, perm os.FileMode, dirDesc string) error {
@@ -288,6 +351,9 @@ var osReleaseOnce = &sync.Once{}
 var osRelease string
 
 func unameKernelRelease() string {
+	if runtime.GOOS == "windows" {
+		return "-"
+	}
 	ctx, cancelFn := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelFn()
 	out, err := exec.CommandContext(ctx, "uname", "-r").CombinedOutput()
@@ -368,4 +434,23 @@ func getSystemSummary(ctx context.Context) string {
 	default:
 		return fmt.Sprintf("%s (%s)", runtime.GOOS, runtime.GOARCH)
 	}
+}
+
+// job socket path on remote machine
+func GetRemoteJobSocketPath(jobId string) string {
+	socketDir := filepath.Join("/tmp", fmt.Sprintf("waveterm-%d", os.Getuid()))
+	return filepath.Join(socketDir, fmt.Sprintf("%s.sock", jobId))
+}
+
+// job file path on remote machine
+func GetRemoteJobFilePath(jobId string, extension string) string {
+	jobDir := GetRemoteJobLogDir()
+	return filepath.Join(jobDir, fmt.Sprintf("%s.%s", jobId, extension))
+}
+
+// job file dir on remote machines
+func GetRemoteJobLogDir() string {
+	homeDir := GetHomeDir()
+	jobDir := filepath.Join(homeDir, ".waveterm", "jobs")
+	return jobDir
 }

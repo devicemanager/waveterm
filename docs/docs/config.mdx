@@ -6,6 +6,7 @@ title: "Configuration"
 
 import { Kbd } from "@site/src/components/kbd";
 import { PlatformProvider, PlatformSelectorButton } from "@site/src/components/platformcontext";
+import { VersionBadge } from "@site/src/components/versionbadge";
 
 <PlatformProvider>
 
@@ -37,6 +38,11 @@ wsh editconfig
 | app:dismissarchitecturewarning       | bool     | Disable warnings on app start when you are using a non-native architecture for Wave. For more info, see [Why does Wave warn me about ARM64 translation when it launches?](./faq#why-does-wave-warn-me-about-arm64-translation-when-it-launches).              |
 | app:defaultnewblock                  | string   | Sets the default new block (Cmd:n, Cmd:d). "term" for terminal block, "launcher" for launcher block (default = "term")                                                                                                                                        |
 | app:showoverlayblocknums             | bool     | Set to false to disable the Ctrl+Shift block number overlay that appears when holding Ctrl+Shift (defaults to true)                                                                                                                                           |
+| app:ctrlvpaste                       | bool     | On Windows/Linux, when null (default) uses Control+V on Windows only. Set to true to force Control+V on all non-macOS platforms, false to disable the accelerator. macOS always uses Command+V regardless of this setting                                     |
+| app:confirmquit <VersionBadge version="v0.14" />                     | bool     | Set to false to disable the quit confirmation dialog when closing Wave Terminal (defaults to true, requires app restart)                                                                                                                                      |
+| app:hideaibutton <VersionBadge version="v0.14" />                    | bool     | Set to true to hide the AI button in the tab bar (defaults to false)                                                                                                                                                                                          |
+| app:disablectrlshiftarrows <VersionBadge version="v0.14" />          | bool     | Set to true to disable Ctrl+Shift+Arrow keybindings for block navigation (defaults to false)                                                                                                                                                                  |
+| app:disablectrlshiftdisplay <VersionBadge version="v0.14" />         | bool     | Set to true to disable the Ctrl+Shift visual indicator display (defaults to false)                                                                                                                                                                            |
 | ai:preset                            | string   | the default AI preset to use                                                                                                                                                                                                                                  |
 | ai:baseurl                           | string   | Set the AI Base Url (must be OpenAI compatible)                                                                                                                                                                                                               |
 | ai:apitoken                          | string   | your AI api token                                                                                                                                                                                                                                             |
@@ -49,6 +55,7 @@ wsh editconfig
 | ai:timeoutms                         | int      | timeout (in milliseconds) for AI calls                                                                                                                                        |
 | ai:proxyurl                          | string   | HTTP proxy URL for AI API requests (does not apply to Wave Cloud AI)                                                                                                          |
 | conn:askbeforewshinstall             | bool     | set to false to disable popup asking if you want to install wsh extensions on new machines                                                                                                                                                                    |
+| conn:localhostdisplayname <VersionBadge version="v0.14" />           | string   | override the display name for localhost in the UI (e.g., set to "My Laptop" or "Local", or set to empty string to hide the name)                                                                                                                                                                       |
 | term:fontsize                        | float    | the fontsize for the terminal block                                                                                                                                                                                                                           |
 | term:fontfamily                      | string   | font family to use for terminal block                                                                                                                                                                                                                         |
 | term:disablewebgl                    | bool     | set to false to disable WebGL acceleration in terminal                                                                                                                                                                                                        |
@@ -60,17 +67,21 @@ wsh editconfig
 | term:transparency                    | float64  | set the background transparency of terminal theme (default 0.5, 0 = not transparent, 1.0 = fully transparent)                                                                                                                                                 |
 | term:allowbracketedpaste             | bool     | allow bracketed paste mode in terminal (default false)                                                                                                                                                                                                        |
 | term:shiftenternewline               | bool     | when enabled, Shift+Enter sends escape sequence + newline (\u001b\n) instead of carriage return, useful for claude code and similar AI coding tools (default false)                                                                                         |
+| term:macoptionismeta                 | bool     | on macOS, treat the Option key as Meta key for terminal keybindings (default false)                                                                                                                                                                          |
+| term:bellsound <VersionBadge version="v0.14" />                      | bool     | when enabled, plays the system beep sound when the terminal bell (BEL character) is received (default false)                                                                                                                                                  |
+| term:bellindicator <VersionBadge version="v0.14" />                  | bool     | when enabled, shows a visual indicator in the tab when the terminal bell is received (default false)                                                                                                                                                           |
+| term:durable <VersionBadge version="v0.14" />                        | bool     | makes remote terminal sessions durable across network disconnects (defaults to false)                                                                                                                                                                           |
 | editor:minimapenabled                | bool     | set to false to disable editor minimap                                                                                                                                                                                                                        |
 | editor:stickyscrollenabled           | bool     | enables monaco editor's stickyScroll feature (pinning headers of current context, e.g. class names, method names, etc.), defaults to false                                                                                                                    |
 | editor:wordwrap                      | bool     | set to true to enable word wrapping in the editor (defaults to false)                                                                                                                                                                                         |
 | editor:fontsize                      | float64  | set the font size for the editor (defaults to 12px)                                                                                                                                                                                                           |
+| editor:inlinediff                    | bool     | set to true to show diffs inline instead of side-by-side, false for side-by-side (defaults to undefined which uses Monaco's responsive behavior)                                                                                                              |
 | preview:showhiddenfiles              | bool     | set to false to disable showing hidden files in the directory preview (defaults to true)                                                                                                                                                                      |
 | markdown:fontsize                    | float64  | font size for the normal text when rendering markdown in preview. headers are scaled up from this size, (default 14px)                                                                                                                                        |
 | markdown:fixedfontsize               | float64  | font size for the code blocks when rendering markdown in preview (default is 12px)                                                                                                                                                                            |
 | web:openlinksinternally              | bool     | set to false to open web links in external browser                                                                                                                                                                                                            |
 | web:defaulturl                       | string   | default web page to open in the web widget when no url is provided (homepage)                                                                                                                                                                                 |
 | web:defaultsearch                    | string   | search template for web searches. e.g. `https://www.google.com/search?q={query}`. "\{query}" gets replaced by search term                                                                                                                                     |
-| blockheader:showblockids             | bool     | show first 8 chars of blockid in the header                                                                                                                                                                                                                   |
 | autoupdate:enabled                   | bool     | enable/disable checking for updates (requires app restart)                                                                                                                                                                                                    |
 | autoupdate:intervalms                | float64  | time in milliseconds to wait between update checks (requires app restart)                                                                                                                                                                                     |
 | autoupdate:installonquit             | bool     | whether to automatically install updates on quit (requires app restart)                                                                                                                                                                                       |
@@ -91,12 +102,13 @@ wsh editconfig
 | window:showmenubar                   | bool     | set to use the OS-native menu bar (Windows and Linux only, requires app restart)                                                                                                                                                                              |
 | window:nativetitlebar                | bool     | set to use the OS-native title bar, rather than the overlay (Windows and Linux only, requires app restart)                                                                                                                                                    |
 | window:disablehardwareacceleration   | bool     | set to disable Chromium hardware acceleration to resolve graphical bugs (requires app restart)                                                                                                                                                                |
+| window:fullscreenonlaunch            | bool     | set to true to launch the foreground window in fullscreen mode (defaults to false)                                                                                                                                                                            |
 | window:savelastwindow                | bool     | when `true`, the last window that is closed is preserved and is reopened the next time the app is launched (defaults to `true`)                                                                                                                               |
 | window:confirmonclose                | bool     | when `true`, a prompt will ask a user to confirm that they want to close a window if it has an unsaved workspace with more than one tab (defaults to `true`)                                                                                                  |
 | window:dimensions                    | string   | set the default dimensions for new windows using the format "WIDTHxHEIGHT" (e.g. "1920x1080"). when a new window is created, these dimensions will be automatically applied. The width and height values should be specified in pixels.                       |
 | telemetry:enabled                    | bool     | set to enable/disable telemetry                                                                                                                                                                                                                               |
 
-For reference, this is the current default configuration (v0.11.5):
+For reference, this is the current default configuration (v0.14.0):
 
 ```json
 {
@@ -105,6 +117,10 @@ For reference, this is the current default configuration (v0.11.5):
     "ai:maxtokens": 4000,
     "ai:timeoutms": 60000,
     "app:defaultnewblock": "term",
+    "app:confirmquit": true,
+    "app:hideaibutton": false,
+    "app:disablectrlshiftarrows": false,
+    "app:disablectrlshiftdisplay": false,
     "autoupdate:enabled": true,
     "autoupdate:installonquit": true,
     "autoupdate:intervalms": 3600000,
@@ -119,11 +135,17 @@ For reference, this is the current default configuration (v0.11.5):
     "window:magnifiedblockopacity": 0.6,
     "window:magnifiedblocksize": 0.9,
     "window:magnifiedblockblurprimarypx": 10,
+    "window:fullscreenonlaunch": false,
     "window:magnifiedblockblursecondarypx": 2,
     "window:confirmclose": true,
     "window:savelastwindow": true,
     "telemetry:enabled": true,
-    "term:copyonselect": true
+    "term:bellsound": false,
+    "term:bellindicator": false,
+    "term:copyonselect": true,
+    "term:durable": false,
+    "waveai:showcloudmodes": true,
+    "waveai:defaultmode": "waveai@balanced"
 }
 ```
 

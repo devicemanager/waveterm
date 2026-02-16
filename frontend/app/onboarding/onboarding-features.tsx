@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Logo from "@/app/asset/logo.svg";
-import { Button } from "@/app/element/button";
 import { EmojiButton } from "@/app/element/emojibutton";
 import { MagnifyIcon } from "@/app/element/magnify";
-import { atoms, globalStore } from "@/app/store/global";
+import { ClientModel } from "@/app/store/client-model";
 import * as WOS from "@/app/store/wos";
 import { RpcApi } from "@/app/store/wshclientapi";
 import { TabRpcClient } from "@/app/store/wshrpcutil";
@@ -13,56 +12,12 @@ import { isMacOS } from "@/util/platformutil";
 import { useEffect, useState } from "react";
 import { FakeChat } from "./fakechat";
 import { EditBashrcCommand, ViewLogoCommand, ViewShortcutsCommand } from "./onboarding-command";
+import { CurrentOnboardingVersion } from "./onboarding-common";
+import { DurableSessionPage } from "./onboarding-durable";
+import { OnboardingFooter } from "./onboarding-features-footer";
 import { FakeLayout } from "./onboarding-layout";
 
-export const CurrentOnboardingVersion = "v0.12.0";
-
-type FeaturePageName = "waveai" | "magnify" | "files";
-
-const OnboardingFooter = ({
-    currentStep,
-    totalSteps,
-    onNext,
-    onPrev,
-    onSkip,
-}: {
-    currentStep: number;
-    totalSteps: number;
-    onNext: () => void;
-    onPrev?: () => void;
-    onSkip?: () => void;
-}) => {
-    const isLastStep = currentStep === totalSteps;
-    const buttonText = isLastStep ? "Get Started" : "Next";
-
-    return (
-        <footer className="unselectable flex-shrink-0 mt-5 relative">
-            <div className="absolute left-0 top-1/2 -translate-y-1/2 flex items-center gap-2">
-                {currentStep > 1 && onPrev && (
-                    <button className="text-muted cursor-pointer hover:text-foreground text-[13px]" onClick={onPrev}>
-                        &lt; Prev
-                    </button>
-                )}
-                <span className="text-muted text-[13px]">
-                    {currentStep} of {totalSteps}
-                </span>
-            </div>
-            <div className="flex flex-row items-center justify-center [&>button]:!px-5 [&>button]:!py-2 [&>button]:text-sm">
-                <Button className="font-[600]" onClick={onNext}>
-                    {buttonText}
-                </Button>
-            </div>
-            {!isLastStep && onSkip && (
-                <button
-                    className="absolute right-0 top-1/2 -translate-y-1/2 text-muted cursor-pointer hover:text-muted-hover text-[13px]"
-                    onClick={onSkip}
-                >
-                    Skip Feature Tour &gt;
-                </button>
-            )}
-        </footer>
-    );
-};
+type FeaturePageName = "waveai" | "durable" | "magnify" | "files";
 
 const WaveAIPage = ({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }) => {
     const isMac = isMacOS();
@@ -101,7 +56,7 @@ const WaveAIPage = ({ onNext, onSkip }: { onNext: () => void; onSkip: () => void
                         <div className="flex flex-col items-start gap-4 text-secondary">
                             <p>
                                 Wave AI is your terminal assistant with context. I can read your terminal output,
-                                analyze widgets, access files, and help you solve problems faster.
+                                analyze widgets, read/write files, and help you solve problems faster.
                             </p>
 
                             <div className="flex items-start gap-3 w-full">
@@ -127,6 +82,14 @@ const WaveAIPage = ({ onNext, onSkip }: { onNext: () => void; onSkip: () => void
                                 </p>
                             </div>
 
+                            <div className="flex items-start gap-3 w-full">
+                                <i className="fa fa-key text-accent text-lg mt-1 flex-shrink-0" />
+                                <p>
+                                    Bring your own API keys or run local models with Ollama, LM Studio, and other
+                                    OpenAI-compatible providers
+                                </p>
+                            </div>
+
                             <EmojiButton emoji="🔥" isClicked={fireClicked} onClick={handleFireClick} />
                         </div>
                     </div>
@@ -138,7 +101,7 @@ const WaveAIPage = ({ onNext, onSkip }: { onNext: () => void; onSkip: () => void
                     </div>
                 </div>
             </div>
-            <OnboardingFooter currentStep={1} totalSteps={3} onNext={onNext} onSkip={onSkip} />
+            <OnboardingFooter currentStep={1} totalSteps={4} onNext={onNext} onSkip={onSkip} />
         </div>
     );
 };
@@ -204,7 +167,7 @@ const MagnifyBlocksPage = ({
                     <FakeLayout />
                 </div>
             </div>
-            <OnboardingFooter currentStep={2} totalSteps={3} onNext={onNext} onPrev={onPrev} onSkip={onSkip} />
+            <OnboardingFooter currentStep={3} totalSteps={4} onNext={onNext} onPrev={onPrev} onSkip={onSkip} />
         </div>
     );
 };
@@ -298,7 +261,7 @@ const FilesPage = ({ onFinish, onPrev }: { onFinish: () => void; onPrev?: () => 
                     {commands[commandIndex](handleCommandComplete)}
                 </div>
             </div>
-            <OnboardingFooter currentStep={3} totalSteps={3} onNext={onFinish} onPrev={onPrev} />
+            <OnboardingFooter currentStep={4} totalSteps={4} onNext={onFinish} onPrev={onPrev} />
         </div>
     );
 };
@@ -307,7 +270,7 @@ export const OnboardingFeatures = ({ onComplete }: { onComplete: () => void }) =
     const [currentPage, setCurrentPage] = useState<FeaturePageName>("waveai");
 
     useEffect(() => {
-        const clientId = globalStore.get(atoms.clientId);
+        const clientId = ClientModel.getInstance().clientId;
         RpcApi.SetMetaCommand(TabRpcClient, {
             oref: WOS.makeORef("client", clientId),
             meta: { "onboarding:lastversion": CurrentOnboardingVersion },
@@ -322,6 +285,8 @@ export const OnboardingFeatures = ({ onComplete }: { onComplete: () => void }) =
 
     const handleNext = () => {
         if (currentPage === "waveai") {
+            setCurrentPage("durable");
+        } else if (currentPage === "durable") {
             setCurrentPage("magnify");
         } else if (currentPage === "magnify") {
             setCurrentPage("files");
@@ -329,8 +294,10 @@ export const OnboardingFeatures = ({ onComplete }: { onComplete: () => void }) =
     };
 
     const handlePrev = () => {
-        if (currentPage === "magnify") {
+        if (currentPage === "durable") {
             setCurrentPage("waveai");
+        } else if (currentPage === "magnify") {
+            setCurrentPage("durable");
         } else if (currentPage === "files") {
             setCurrentPage("magnify");
         }
@@ -352,6 +319,9 @@ export const OnboardingFeatures = ({ onComplete }: { onComplete: () => void }) =
     switch (currentPage) {
         case "waveai":
             pageComp = <WaveAIPage onNext={handleNext} onSkip={handleSkip} />;
+            break;
+        case "durable":
+            pageComp = <DurableSessionPage onNext={handleNext} onSkip={handleSkip} onPrev={handlePrev} />;
             break;
         case "magnify":
             pageComp = <MagnifyBlocksPage onNext={handleNext} onSkip={handleSkip} onPrev={handlePrev} />;

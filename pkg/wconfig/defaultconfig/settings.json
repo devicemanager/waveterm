@@ -4,6 +4,10 @@
     "ai:maxtokens": 4000,
     "ai:timeoutms": 60000,
     "app:defaultnewblock": "term",
+    "app:confirmquit": true,
+    "app:hideaibutton": false,
+    "app:disablectrlshiftarrows": false,
+    "app:disablectrlshiftdisplay": false,
     "autoupdate:enabled": true,
     "autoupdate:installonquit": true,
     "autoupdate:intervalms": 3600000,
@@ -18,9 +22,15 @@
     "window:magnifiedblockopacity": 0.6,
     "window:magnifiedblocksize": 0.9,
     "window:magnifiedblockblurprimarypx": 10,
+    "window:fullscreenonlaunch": false,
     "window:magnifiedblockblursecondarypx": 2,
     "window:confirmclose": true,
     "window:savelastwindow": true,
     "telemetry:enabled": true,
-    "term:copyonselect": true
+    "term:bellsound": false,
+    "term:bellindicator": false,
+    "term:copyonselect": true,
+    "term:durable": false,
+    "waveai:showcloudmodes": true,
+    "waveai:defaultmode": "waveai@balanced"
 }

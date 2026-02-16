@@ -5,7 +5,6 @@ package cmd
 
 import (
 	"fmt"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/wavetermdev/waveterm/pkg/waveobj"
@@ -34,32 +33,29 @@ func editConfigRun(cmd *cobra.Command, args []string) (rtnErr error) {
 		sendActivity("editconfig", rtnErr == nil)
 	}()
 
-	// Get config directory from Wave info
-	resp, err := wshclient.WaveInfoCommand(RpcClient, &wshrpc.RpcOpts{Timeout: 2000})
-	if err != nil {
-		return fmt.Errorf("getting Wave info: %w", err)
-	}
-
 	configFile := "settings.json" // default
 	if len(args) > 0 {
 		configFile = args[0]
 	}
 
-	settingsFile := filepath.Join(resp.ConfigDir, configFile)
+	tabId := getTabIdFromEnv()
+	if tabId == "" {
+		return fmt.Errorf("no WAVETERM_TABID env var set")
+	}
 
 	wshCmd := &wshrpc.CommandCreateBlockData{
+		TabId: tabId,
 		BlockDef: &waveobj.BlockDef{
 			Meta: map[string]interface{}{
-				waveobj.MetaKey_View: "preview",
-				waveobj.MetaKey_File: settingsFile,
-				waveobj.MetaKey_Edit: true,
+				waveobj.MetaKey_View: "waveconfig",
+				waveobj.MetaKey_File: configFile,
 			},
 		},
 		Magnified: editConfigMagnified,
 		Focused:   true,
 	}
 
-	_, err = RpcClient.SendRpcRequest(wshrpc.Command_CreateBlock, wshCmd, &wshrpc.RpcOpts{Timeout: 2000})
+	_, err := wshclient.CreateBlockCommand(RpcClient, *wshCmd, &wshrpc.RpcOpts{Timeout: 2000})
 	if err != nil {
 		return fmt.Errorf("opening config file: %w", err)
 	}

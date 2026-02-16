@@ -10,12 +10,69 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/wavetermdev/waveterm/pkg/aiusechat/aiutil"
 	"github.com/wavetermdev/waveterm/pkg/aiusechat/uctypes"
 	"github.com/wavetermdev/waveterm/pkg/blockcontroller"
+	"github.com/wavetermdev/waveterm/pkg/util/utilfn"
 	"github.com/wavetermdev/waveterm/pkg/wavebase"
 	"github.com/wavetermdev/waveterm/pkg/waveobj"
 	"github.com/wavetermdev/waveterm/pkg/wstore"
 )
+
+func makeTerminalBlockDesc(block *waveobj.Block) string {
+	connection, hasConnection := block.Meta["connection"].(string)
+	cwd, hasCwd := block.Meta["cmd:cwd"].(string)
+
+	blockORef := waveobj.MakeORef(waveobj.OType_Block, block.OID)
+	rtInfo := wstore.GetRTInfo(blockORef)
+	hasCurCwd := rtInfo != nil && rtInfo.ShellHasCurCwd
+
+	var desc string
+	if hasConnection && connection != "" {
+		desc = fmt.Sprintf("CLI terminal connected to %q", connection)
+	} else {
+		desc = "local CLI terminal"
+	}
+
+	if rtInfo != nil && rtInfo.ShellType != "" {
+		desc += fmt.Sprintf(" (%s", rtInfo.ShellType)
+		if rtInfo.ShellVersion != "" {
+			desc += fmt.Sprintf(" %s", rtInfo.ShellVersion)
+		}
+		desc += ")"
+	}
+
+	if rtInfo != nil {
+		if rtInfo.ShellIntegration {
+			var stateStr string
+			switch rtInfo.ShellState {
+			case "ready":
+				stateStr = "waiting for input"
+			case "running-command":
+				stateStr = "running command"
+				if rtInfo.ShellLastCmd != "" {
+					cmdStr := rtInfo.ShellLastCmd
+					if len(cmdStr) > 30 {
+						cmdStr = cmdStr[:27] + "..."
+					}
+					cmdJSON := utilfn.MarshalJSONString(cmdStr)
+					stateStr = fmt.Sprintf("running command %s", cmdJSON)
+				}
+			default:
+				stateStr = "state unknown"
+			}
+			desc += fmt.Sprintf(", %s", stateStr)
+		} else {
+			desc += ", no shell integration"
+		}
+	}
+
+	if hasCurCwd && hasCwd && cwd != "" {
+		desc += fmt.Sprintf(", in directory %q", cwd)
+	}
+
+	return desc
+}
 
 func MakeBlockShortDesc(block *waveobj.Block) string {
 	if block.Meta == nil {
@@ -29,25 +86,7 @@ func MakeBlockShortDesc(block *waveobj.Block) string {
 
 	switch viewType {
 	case "term":
-		connection, hasConnection := block.Meta["connection"].(string)
-		cwd, hasCwd := block.Meta["cmd:cwd"].(string)
-
-		blockORef := waveobj.MakeORef(waveobj.OType_Block, block.OID)
-		rtInfo := wstore.GetRTInfo(blockORef)
-		hasCurCwd := rtInfo != nil && rtInfo.CmdHasCurCwd
-
-		var desc string
-		if hasConnection && connection != "" {
-			desc = fmt.Sprintf("CLI terminal on %q", connection)
-		} else {
-			desc = "local CLI terminal"
-		}
-
-		if hasCurCwd && hasCwd && cwd != "" {
-			desc += fmt.Sprintf(" in directory %q", cwd)
-		}
-
-		return desc
+		return makeTerminalBlockDesc(block)
 	case "preview":
 		file, hasFile := block.Meta["file"].(string)
 		connection, hasConnection := block.Meta["connection"].(string)
@@ -82,12 +121,19 @@ func MakeBlockShortDesc(block *waveobj.Block) string {
 		return "placeholder widget used to launch other widgets"
 	case "tsunami":
 		return handleTsunamiBlockDesc(block)
+	case "aifilediff":
+		return "" // AI doesn't need to see these
+	case "waveconfig":
+		if file, hasFile := block.Meta["file"].(string); hasFile && file != "" {
+			return fmt.Sprintf("wave config editor for %q", file)
+		}
+		return "wave config editor"
 	default:
 		return fmt.Sprintf("unknown widget with type %q", viewType)
 	}
 }
 
-func GenerateTabStateAndTools(ctx context.Context, tabid string, widgetAccess bool) (string, []uctypes.ToolDefinition, error) {
+func GenerateTabStateAndTools(ctx context.Context, tabid string, widgetAccess bool, chatOpts *uctypes.WaveChatOpts) (string, []uctypes.ToolDefinition, error) {
 	if tabid == "" {
 		return "", nil, nil
 	}
@@ -111,11 +157,22 @@ func GenerateTabStateAndTools(ctx context.Context, tabid string, widgetAccess bo
 		}
 	}
 	tabState := GenerateCurrentTabStatePrompt(blocks, widgetAccess)
+	// for debugging
+	// log.Printf("TABPROMPT %s\n", tabState)
 	var tools []uctypes.ToolDefinition
 	if widgetAccess {
-		tools = append(tools, GetCaptureScreenshotToolDefinition(tabid))
+		// Only add screenshot tool for:
+		// - openai-responses API type
+		// - google-gemini API type with Gemini 3+ models
+		if chatOpts.Config.APIType == uctypes.APIType_OpenAIResponses ||
+		   (chatOpts.Config.APIType == uctypes.APIType_GoogleGemini && aiutil.GeminiSupportsImageToolResults(chatOpts.Config.Model)) {
+			tools = append(tools, GetCaptureScreenshotToolDefinition(tabid))
+		}
 		tools = append(tools, GetReadTextFileToolDefinition())
 		tools = append(tools, GetReadDirToolDefinition())
+		tools = append(tools, GetWriteTextFileToolDefinition())
+		tools = append(tools, GetEditTextFileToolDefinition())
+		tools = append(tools, GetDeleteTextFileToolDefinition())
 		viewTypes := make(map[string]bool)
 		for _, block := range blocks {
 			if block.Meta == nil {
@@ -133,6 +190,7 @@ func GenerateTabStateAndTools(ctx context.Context, tabid string, widgetAccess bo
 		}
 		if viewTypes["term"] {
 			tools = append(tools, GetTermGetScrollbackToolDefinition(tabid))
+			// tools = append(tools, GetTermCommandOutputToolDefinition(tabid))
 		}
 		if viewTypes["web"] {
 			tools = append(tools, GetWebNavigateToolDefinition(tabid))
@@ -176,7 +234,6 @@ func GenerateCurrentTabStatePrompt(blocks []*waveobj.Block, widgetAccess bool) s
 	}
 	prompt.WriteString("</current_tab_state>")
 	rtn := prompt.String()
-	// log.Printf("%s\n", rtn)
 	return rtn
 }
 
@@ -226,7 +283,7 @@ func GetAdderToolDefinition() uctypes.ToolDefinition {
 			"required":             []string{"values"},
 			"additionalProperties": false,
 		},
-		ToolAnyCallback: func(input any) (any, error) {
+		ToolAnyCallback: func(input any, toolUseData *uctypes.UIMessageDataToolUse) (any, error) {
 			inputMap, ok := input.(map[string]any)
 			if !ok {
 				return nil, fmt.Errorf("invalid input format")

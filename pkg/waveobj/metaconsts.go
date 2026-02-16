@@ -41,6 +41,7 @@ const (
 	MetaKey_Cmd                              = "cmd"
 	MetaKey_CmdInteractive                   = "cmd:interactive"
 	MetaKey_CmdLogin                         = "cmd:login"
+	MetaKey_CmdPersistent                    = "cmd:persistent"
 	MetaKey_CmdRunOnStart                    = "cmd:runonstart"
 	MetaKey_CmdClearOnStart                  = "cmd:clearonstart"
 	MetaKey_CmdRunOnce                       = "cmd:runonce"
@@ -72,6 +73,9 @@ const (
 	MetaKey_AIApiVersion                     = "ai:apiversion"
 	MetaKey_AiMaxTokens                      = "ai:maxtokens"
 	MetaKey_AiTimeoutMs                      = "ai:timeoutms"
+
+	MetaKey_AiFileDiffChatId                 = "aifilediff:chatid"
+	MetaKey_AiFileDiffToolCallId             = "aifilediff:toolcallid"
 
 	MetaKey_EditorClear                      = "editor:*"
 	MetaKey_EditorMinimapEnabled             = "editor:minimapenabled"
@@ -111,7 +115,11 @@ const (
 	MetaKey_TermTransparency                 = "term:transparency"
 	MetaKey_TermAllowBracketedPaste          = "term:allowbracketedpaste"
 	MetaKey_TermShiftEnterNewline            = "term:shiftenternewline"
+	MetaKey_TermMacOptionIsMeta              = "term:macoptionismeta"
 	MetaKey_TermConnDebug                    = "term:conndebug"
+	MetaKey_TermBellSound                    = "term:bellsound"
+	MetaKey_TermBellIndicator                = "term:bellindicator"
+	MetaKey_TermDurable                      = "term:durable"
 
 	MetaKey_WebZoom                          = "web:zoom"
 	MetaKey_WebHideNav                       = "web:hidenav"
@@ -124,6 +132,7 @@ const (
 	MetaKey_TsunamiClear                     = "tsunami:*"
 	MetaKey_TsunamiSdkReplacePath            = "tsunami:sdkreplacepath"
 	MetaKey_TsunamiAppPath                   = "tsunami:apppath"
+	MetaKey_TsunamiAppId                     = "tsunami:appid"
 	MetaKey_TsunamiScaffoldPath              = "tsunami:scaffoldpath"
 	MetaKey_TsunamiEnv                       = "tsunami:env"
 

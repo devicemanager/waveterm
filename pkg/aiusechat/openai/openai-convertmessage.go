@@ -4,7 +4,6 @@
 package openai
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -12,50 +11,77 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/wavetermdev/waveterm/pkg/aiusechat/aiutil"
 	"github.com/wavetermdev/waveterm/pkg/aiusechat/uctypes"
-	"github.com/wavetermdev/waveterm/pkg/util/utilfn"
 	"github.com/wavetermdev/waveterm/pkg/wavebase"
 )
 
 const (
 	OpenAIDefaultAPIVersion = "2024-12-31"
 	OpenAIDefaultMaxTokens  = 4096
+	// "medium" verbosity is more widely supported across models than "low"
+	OpenAIDefaultVerbosity = "medium"
 )
 
-// extractXmlAttribute extracts an attribute value from an XML-like tag.
-// Expects double-quoted strings where internal quotes are encoded as &quot;.
-// Returns the unquoted value and true if found, or empty string and false if not found or invalid.
-func extractXmlAttribute(tag, attrName string) (string, bool) {
-	attrStart := strings.Index(tag, attrName+"=")
-	if attrStart == -1 {
-		return "", false
+// convertContentBlockToParts converts a single content block to UIMessageParts
+func convertContentBlockToParts(block OpenAIMessageContent, role string) []uctypes.UIMessagePart {
+	var parts []uctypes.UIMessagePart
+
+	switch block.Type {
+	case "input_text", "output_text":
+		if found, part := aiutil.ConvertDataUserFile(block.Text); found {
+			if part != nil {
+				parts = append(parts, *part)
+			}
+		} else {
+			parts = append(parts, uctypes.UIMessagePart{
+				Type: "text",
+				Text: block.Text,
+			})
+		}
+	case "input_image":
+		if role == "user" {
+			parts = append(parts, uctypes.UIMessagePart{
+				Type: "data-userfile",
+				Data: uctypes.UIMessageDataUserFile{
+					FileName:   block.Filename,
+					MimeType:   "image/*",
+					PreviewUrl: block.PreviewUrl,
+				},
+			})
+		}
+	case "input_file":
+		if role == "user" {
+			parts = append(parts, uctypes.UIMessagePart{
+				Type: "data-userfile",
+				Data: uctypes.UIMessageDataUserFile{
+					FileName:   block.Filename,
+					MimeType:   "application/pdf",
+					PreviewUrl: block.PreviewUrl,
+				},
+			})
+		}
 	}
 
-	pos := attrStart + len(attrName+"=")
-	start := strings.Index(tag[pos:], `"`)
-	if start == -1 {
-		return "", false
-	}
-	start += pos
+	return parts
+}
 
-	end := strings.Index(tag[start+1:], `"`)
-	if end == -1 {
-		return "", false
+// appendToLastUserMessage appends a text block to the last user message in the inputs slice
+func appendToLastUserMessage(inputs []any, text string) {
+	for i := len(inputs) - 1; i >= 0; i-- {
+		if msg, ok := inputs[i].(OpenAIMessage); ok && msg.Role == "user" {
+			block := OpenAIMessageContent{
+				Type: "input_text",
+				Text: text,
+			}
+			msg.Content = append(msg.Content, block)
+			inputs[i] = msg
+			break
+		}
 	}
-	end += start + 1
-
-	quotedValue := tag[start : end+1]
-	value, err := strconv.Unquote(quotedValue)
-	if err != nil {
-		return "", false
-	}
-
-	value = strings.ReplaceAll(value, "&quot;", `"`)
-	return value, true
 }
 
 // ---------- OpenAI Request Types ----------
@@ -119,12 +145,11 @@ type OpenAIRequestTool struct {
 
 // ConvertToolDefinitionToOpenAI converts a generic ToolDefinition to OpenAI format
 func ConvertToolDefinitionToOpenAI(tool uctypes.ToolDefinition) OpenAIRequestTool {
-	cleanedTool := tool.Clean()
 	return OpenAIRequestTool{
-		Name:        cleanedTool.Name,
-		Description: cleanedTool.Description,
-		Parameters:  cleanedTool.InputSchema,
-		Strict:      cleanedTool.Strict,
+		Name:        tool.Name,
+		Description: tool.Description,
+		Parameters:  tool.InputSchema,
+		Strict:      tool.Strict,
 		Type:        "function",
 	}
 }
@@ -133,15 +158,29 @@ func debugPrintReq(req *OpenAIRequest, endpoint string) {
 	if !wavebase.IsDevMode() {
 		return
 	}
+	if endpoint != uctypes.DefaultAIEndpoint {
+		log.Printf("endpoint: %s\n", endpoint)
+	}
 	var toolNames []string
 	for _, tool := range req.Tools {
 		toolNames = append(toolNames, tool.Name)
 	}
-	log.Printf("model %s\n", req.Model)
+	modelInfo := req.Model
+	var details []string
+	if req.Reasoning != nil && req.Reasoning.Effort != "" {
+		details = append(details, fmt.Sprintf("reasoning: %s", req.Reasoning.Effort))
+	}
+	if req.MaxOutputTokens > 0 {
+		details = append(details, fmt.Sprintf("max_tokens: %d", req.MaxOutputTokens))
+	}
+	if len(details) > 0 {
+		log.Printf("model %s (%s)\n", modelInfo, strings.Join(details, ", "))
+	} else {
+		log.Printf("model %s\n", modelInfo)
+	}
 	if len(toolNames) > 0 {
 		log.Printf("tools: %s\n", strings.Join(toolNames, ","))
 	}
-	// log.Printf("reasoning %v\n", req.Reasoning)
 
 	log.Printf("inputs (%d):", len(req.Input))
 	for idx, input := range req.Input {
@@ -153,23 +192,24 @@ func debugPrintReq(req *OpenAIRequest, endpoint string) {
 func buildOpenAIHTTPRequest(ctx context.Context, inputs []any, chatOpts uctypes.WaveChatOpts, cont *uctypes.WaveContinueResponse) (*http.Request, error) {
 	opts := chatOpts.Config
 
-	// If continuing from premium rate limit, downgrade to default model and low thinking
+	// If continuing from premium rate limit, downgrade to default model and medium thinking
+	// (medium is more widely supported than low across different models)
 	if cont != nil && cont.ContinueFromKind == uctypes.StopKindPremiumRateLimit {
 		opts.Model = uctypes.DefaultOpenAIModel
-		opts.ThinkingLevel = uctypes.ThinkingLevelLow
+		opts.ThinkingLevel = uctypes.ThinkingLevelMedium
 	}
 
 	if opts.Model == "" {
-		return nil, errors.New("opts.model is required")
+		return nil, errors.New("ai:model is required")
 	}
 	if chatOpts.ClientId == "" {
 		return nil, errors.New("chatOpts.ClientId is required")
 	}
 
 	// Set defaults
-	endpoint := opts.BaseURL
+	endpoint := opts.Endpoint
 	if endpoint == "" {
-		return nil, errors.New("BaseURL is required")
+		return nil, errors.New("ai:endpoint is required")
 	}
 
 	maxTokens := opts.MaxTokens
@@ -177,31 +217,33 @@ func buildOpenAIHTTPRequest(ctx context.Context, inputs []any, chatOpts uctypes.
 		maxTokens = OpenAIDefaultMaxTokens
 	}
 
-	// Inject chatOpts.TabState as a text block at the end of the last "user" message
+	// injected data
 	if chatOpts.TabState != "" {
-		// Find the last "user" message
-		for i := len(inputs) - 1; i >= 0; i-- {
-			if msg, ok := inputs[i].(OpenAIMessage); ok && msg.Role == "user" {
-				// Add TabState as a new text block
-				tabStateBlock := OpenAIMessageContent{
-					Type: "input_text",
-					Text: chatOpts.TabState,
-				}
-				msg.Content = append(msg.Content, tabStateBlock)
-				inputs[i] = msg
-				break
-			}
-		}
+		appendToLastUserMessage(inputs, chatOpts.TabState)
+	}
+	if chatOpts.PlatformInfo != "" {
+		appendToLastUserMessage(inputs, "<PlatformInfo>\n"+chatOpts.PlatformInfo+"\n</PlatformInfo>")
+	}
+	if chatOpts.AppStaticFiles != "" {
+		appendToLastUserMessage(inputs, "<CurrentAppStaticFiles>\n"+chatOpts.AppStaticFiles+"\n</CurrentAppStaticFiles>")
+	}
+	if chatOpts.AppGoFile != "" {
+		appendToLastUserMessage(inputs, "<CurrentAppGoFile>\n"+chatOpts.AppGoFile+"\n</CurrentAppGoFile>")
 	}
 
 	// Build request body
+	// Use configured verbosity, or fall back to default constant
+	verbosity := opts.Verbosity
+	if verbosity == "" {
+		verbosity = OpenAIDefaultVerbosity
+	}
 	reqBody := &OpenAIRequest{
 		Model:           opts.Model,
 		Input:           inputs,
 		Stream:          true,
 		StreamOptions:   &StreamOptionsType{IncludeObfuscation: false},
 		MaxOutputTokens: maxTokens,
-		Text:            &TextType{Verbosity: "low"},
+		Text:            &TextType{Verbosity: verbosity},
 	}
 
 	// Add system prompt as instructions if provided
@@ -230,49 +272,50 @@ func buildOpenAIHTTPRequest(ctx context.Context, inputs []any, chatOpts uctypes.
 		reqBody.Tools = append(reqBody.Tools, webSearchTool)
 	}
 
-	// Set reasoning based on thinking level
+	// Set reasoning based on thinking level from config
 	if opts.ThinkingLevel != "" {
 		reqBody.Reasoning = &ReasoningType{
-			Effort: opts.ThinkingLevel, // low, medium, high map directly
+			Effort: opts.ThinkingLevel,
 		}
-		if opts.Model == "gpt-5" {
+		if opts.Model == "gpt-5" || opts.Model == "gpt-5.1" {
 			reqBody.Reasoning.Summary = "auto"
 		}
-	}
-
-	// Set temperature if provided
-	if opts.APIVersion != "" && opts.APIVersion != OpenAIDefaultAPIVersion {
-		// Temperature and other parameters could be set here based on config
-		// For now, using defaults
 	}
 
 	debugPrintReq(reqBody, endpoint)
 
 	// Encode request body
-	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
-	encoder.SetEscapeHTML(false)
-	err := encoder.Encode(reqBody)
+	buf, err := aiutil.JsonEncodeRequestBody(reqBody)
 	if err != nil {
 		return nil, err
 	}
-
 	// Create HTTP request
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &buf)
 	if err != nil {
 		return nil, err
 	}
-
 	// Set headers
 	req.Header.Set("Content-Type", "application/json")
-	if opts.APIToken != "" {
+	// Azure OpenAI uses "api-key" header instead of "Authorization: Bearer"
+	if opts.Provider == uctypes.AIProvider_Azure || opts.Provider == uctypes.AIProvider_AzureLegacy {
+		req.Header.Set("api-key", opts.APIToken)
+	} else {
 		req.Header.Set("Authorization", "Bearer "+opts.APIToken)
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	if chatOpts.ClientId != "" {
-		req.Header.Set("X-Wave-ClientId", chatOpts.ClientId)
+
+	// Only send Wave-specific headers when using Wave provider
+	if opts.Provider == uctypes.AIProvider_Wave {
+		if chatOpts.ClientId != "" {
+			req.Header.Set("X-Wave-ClientId", chatOpts.ClientId)
+		}
+		if chatOpts.ChatId != "" {
+			req.Header.Set("X-Wave-ChatId", chatOpts.ChatId)
+		}
+		req.Header.Set("X-Wave-Version", wavebase.WaveVersion)
+		req.Header.Set("X-Wave-APIType", uctypes.APIType_OpenAIResponses)
+		req.Header.Set("X-Wave-RequestType", chatOpts.GetWaveRequestType())
 	}
-	req.Header.Set("X-Wave-APIType", "openai")
 
 	return req, nil
 }
@@ -289,28 +332,15 @@ func convertFileAIMessagePart(part uctypes.AIMessagePart) (*OpenAIMessageContent
 	// Handle different file types
 	switch {
 	case strings.HasPrefix(part.MimeType, "image/"):
-		// Handle images
-		var imageUrl string
-
-		if part.URL != "" {
-			// Validate URL protocol - only allow data:, http:, https:
-			if !strings.HasPrefix(part.URL, "data:") &&
-				!strings.HasPrefix(part.URL, "http://") &&
-				!strings.HasPrefix(part.URL, "https://") {
-				return nil, fmt.Errorf("unsupported URL protocol in file part: %s", part.URL)
-			}
-			imageUrl = part.URL
-		} else if len(part.Data) > 0 {
-			// Convert raw data to base64 data URL
-			base64Data := base64.StdEncoding.EncodeToString(part.Data)
-			imageUrl = fmt.Sprintf("data:%s;base64,%s", part.MimeType, base64Data)
-		} else {
-			return nil, fmt.Errorf("file part missing both url and data")
+		imageUrl, err := aiutil.ExtractImageUrl(part.Data, part.URL, part.MimeType)
+		if err != nil {
+			return nil, err
 		}
 
 		return &OpenAIMessageContent{
 			Type:       "input_image",
 			ImageUrl:   imageUrl,
+			Filename:   part.FileName,
 			PreviewUrl: part.PreviewUrl,
 		}, nil
 
@@ -334,34 +364,25 @@ func convertFileAIMessagePart(part uctypes.AIMessagePart) (*OpenAIMessageContent
 		}, nil
 
 	case part.MimeType == "text/plain":
-		var textContent string
+		textData, err := aiutil.ExtractTextData(part.Data, part.URL)
+		if err != nil {
+			return nil, err
+		}
+		formattedText := aiutil.FormatAttachedTextFile(part.FileName, textData)
+		return &OpenAIMessageContent{
+			Type: "input_text",
+			Text: formattedText,
+		}, nil
+	case part.MimeType == "directory":
+		var jsonContent string
 
 		if len(part.Data) > 0 {
-			textContent = string(part.Data)
-		} else if part.URL != "" {
-			if strings.HasPrefix(part.URL, "data:") {
-				_, decodedData, err := utilfn.DecodeDataURL(part.URL)
-				if err != nil {
-					return nil, fmt.Errorf("failed to decode data URL for text/plain file: %w", err)
-				}
-				textContent = string(decodedData)
-			} else {
-				return nil, fmt.Errorf("dropping text/plain file with URL (must be fetched and converted to data)")
-			}
+			jsonContent = string(part.Data)
 		} else {
-			return nil, fmt.Errorf("text/plain file part missing data")
+			return nil, fmt.Errorf("directory listing part missing data")
 		}
 
-		fileName := part.FileName
-		if fileName == "" {
-			fileName = "untitled.txt"
-		}
-
-		encodedFileName := strings.ReplaceAll(fileName, `"`, "&quot;")
-		quotedFileName := strconv.Quote(encodedFileName)
-
-		randomSuffix := uuid.New().String()[0:8]
-		formattedText := fmt.Sprintf("<AttachedTextFile_%s file_name=%s>\n%s\n</AttachedTextFile_%s>", randomSuffix, quotedFileName, textContent, randomSuffix)
+		formattedText := aiutil.FormatAttachedDirectoryListing(part.FileName, jsonContent)
 
 		return &OpenAIMessageContent{
 			Type: "input_text",
@@ -369,7 +390,7 @@ func convertFileAIMessagePart(part uctypes.AIMessagePart) (*OpenAIMessageContent
 		}, nil
 
 	default:
-		return nil, fmt.Errorf("dropping file with unsupported mimetype '%s' (OpenAI supports images, PDFs, and text/plain)", part.MimeType)
+		return nil, fmt.Errorf("dropping file with unsupported mimetype '%s' (OpenAI supports images, PDFs, text/plain, and directories)", part.MimeType)
 	}
 }
 
@@ -382,6 +403,8 @@ func ConvertAIMessageToOpenAIChatMessage(aiMsg uctypes.AIMessage) (*OpenAIChatMe
 	}
 
 	var contentBlocks []OpenAIMessageContent
+	imageCount := 0
+	imageFailCount := 0
 
 	for i, part := range aiMsg.Parts {
 		switch part.Type {
@@ -395,8 +418,14 @@ func ConvertAIMessageToOpenAIChatMessage(aiMsg uctypes.AIMessage) (*OpenAIChatMe
 			})
 
 		case uctypes.AIMessagePartTypeFile:
+			if strings.HasPrefix(part.MimeType, "image/") {
+				imageCount++
+			}
 			block, err := convertFileAIMessagePart(part)
 			if err != nil {
+				if strings.HasPrefix(part.MimeType, "image/") {
+					imageFailCount++
+				}
 				log.Printf("openai: %v", err)
 				continue
 			}
@@ -407,6 +436,13 @@ func ConvertAIMessageToOpenAIChatMessage(aiMsg uctypes.AIMessage) (*OpenAIChatMe
 			log.Printf("openai: dropping unknown part type '%s'", part.Type)
 			continue
 		}
+	}
+
+	if len(contentBlocks) == 0 {
+		if imageCount > 0 && imageFailCount == imageCount {
+			return nil, fmt.Errorf("all %d image conversions failed", imageCount)
+		}
+		return nil, errors.New("message has no valid content after processing all parts")
 	}
 
 	return &OpenAIChatMessage{
@@ -475,70 +511,17 @@ func ConvertToolResultsToOpenAIChatMessage(toolResults []uctypes.AIToolResult) (
 	return messages, nil
 }
 
-// ConvertToUIMessage converts an OpenAIChatMessage to a UIMessage
-func (m *OpenAIChatMessage) ConvertToUIMessage() *uctypes.UIMessage {
+// convertToUIMessage converts an OpenAIChatMessage to a UIMessage
+func (m *OpenAIChatMessage) convertToUIMessage() *uctypes.UIMessage {
 	var parts []uctypes.UIMessagePart
 	var role string
 
 	// Handle different message types
 	if m.Message != nil {
 		role = m.Message.Role
-		// Iterate over all content blocks
 		for _, block := range m.Message.Content {
-			switch block.Type {
-			case "input_text", "output_text":
-				if strings.HasPrefix(block.Text, "<AttachedTextFile_") {
-					openTagEnd := strings.Index(block.Text, "\n")
-					if openTagEnd == -1 || block.Text[openTagEnd-1] != '>' {
-						continue
-					}
-
-					openTag := block.Text[:openTagEnd]
-					fileName, ok := extractXmlAttribute(openTag, "file_name")
-					if !ok {
-						continue
-					}
-
-					parts = append(parts, uctypes.UIMessagePart{
-						Type: "data-userfile",
-						Data: uctypes.UIMessageDataUserFile{
-							FileName: fileName,
-							MimeType: "text/plain",
-						},
-					})
-				} else {
-					parts = append(parts, uctypes.UIMessagePart{
-						Type: "text",
-						Text: block.Text,
-					})
-				}
-			case "input_image":
-				// Convert image blocks to data-userfile UIMessagePart (only for user role)
-				if role == "user" {
-					parts = append(parts, uctypes.UIMessagePart{
-						Type: "data-userfile",
-						Data: uctypes.UIMessageDataUserFile{
-							MimeType:   "image/*",
-							PreviewUrl: block.PreviewUrl,
-						},
-					})
-				}
-			case "input_file":
-				// Convert file blocks to data-userfile UIMessagePart (only for user role)
-				if role == "user" {
-					parts = append(parts, uctypes.UIMessagePart{
-						Type: "data-userfile",
-						Data: uctypes.UIMessageDataUserFile{
-							FileName:   block.Filename,
-							MimeType:   "application/pdf",
-							PreviewUrl: block.PreviewUrl,
-						},
-					})
-				}
-			default:
-				// Skip unknown types
-				continue
-			}
+			blockParts := convertContentBlockToParts(block, role)
+			parts = append(parts, blockParts...)
 		}
 	} else if m.FunctionCall != nil {
 		// Handle function call input
@@ -554,11 +537,9 @@ func (m *OpenAIChatMessage) ConvertToUIMessage() *uctypes.UIMessage {
 		// FunctionCallOutput messages are not converted to UIMessage
 		return nil
 	}
-
 	if len(parts) == 0 {
 		return nil
 	}
-
 	return &uctypes.UIMessage{
 		ID:    m.MessageId,
 		Role:  role,
@@ -568,24 +549,20 @@ func (m *OpenAIChatMessage) ConvertToUIMessage() *uctypes.UIMessage {
 
 // ConvertAIChatToUIChat converts an AIChat to a UIChat for OpenAI
 func ConvertAIChatToUIChat(aiChat uctypes.AIChat) (*uctypes.UIChat, error) {
-	if aiChat.APIType != "openai" {
-		return nil, fmt.Errorf("APIType must be 'openai', got '%s'", aiChat.APIType)
+	if aiChat.APIType != uctypes.APIType_OpenAIResponses {
+		return nil, fmt.Errorf("APIType must be '%s', got '%s'", uctypes.APIType_OpenAIResponses, aiChat.APIType)
 	}
-
 	uiMessages := make([]uctypes.UIMessage, 0, len(aiChat.NativeMessages))
-
 	for i, nativeMsg := range aiChat.NativeMessages {
 		openaiMsg, ok := nativeMsg.(*OpenAIChatMessage)
 		if !ok {
 			return nil, fmt.Errorf("message %d: expected *OpenAIChatMessage, got %T", i, nativeMsg)
 		}
-
-		uiMsg := openaiMsg.ConvertToUIMessage()
+		uiMsg := openaiMsg.convertToUIMessage()
 		if uiMsg != nil {
 			uiMessages = append(uiMessages, *uiMsg)
 		}
 	}
-
 	return &uctypes.UIChat{
 		ChatId:     aiChat.ChatId,
 		APIType:    aiChat.APIType,
@@ -593,4 +570,19 @@ func ConvertAIChatToUIChat(aiChat uctypes.AIChat) (*uctypes.UIChat, error) {
 		APIVersion: aiChat.APIVersion,
 		Messages:   uiMessages,
 	}, nil
+}
+
+// GetFunctionCallInputByToolCallId returns the OpenAIFunctionCallInput associated with the given ToolCallId,
+// or nil if not found in the AIChat
+func GetFunctionCallInputByToolCallId(aiChat uctypes.AIChat, toolCallId string) *OpenAIFunctionCallInput {
+	for _, nativeMsg := range aiChat.NativeMessages {
+		openaiMsg, ok := nativeMsg.(*OpenAIChatMessage)
+		if !ok {
+			continue
+		}
+		if openaiMsg.FunctionCall != nil && openaiMsg.FunctionCall.CallId == toolCallId {
+			return openaiMsg.FunctionCall
+		}
+	}
+	return nil
 }

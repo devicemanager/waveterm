@@ -1,4 +1,4 @@
-// Copyright 2025, Command Line Inc.
+// Copyright 2026, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 import { type Placement } from "@floating-ui/react";
@@ -7,28 +7,28 @@ import type * as rxjs from "rxjs";
 
 declare global {
     type GlobalAtomsType = {
-        clientId: jotai.Atom<string>; // readonly
-        client: jotai.Atom<Client>; // driven from WOS
+        builderId: jotai.PrimitiveAtom<string>; // readonly (for builder mode)
+        builderAppId: jotai.PrimitiveAtom<string>; // app being edited in builder mode
+        waveWindowType: jotai.Atom<"tab" | "builder">; // derived from builderId
         uiContext: jotai.Atom<UIContext>; // driven from windowId, tabId
-        waveWindow: jotai.Atom<WaveWindow>; // driven from WOS
         workspace: jotai.Atom<Workspace>; // driven from WOS
         fullConfigAtom: jotai.PrimitiveAtom<FullConfigType>; // driven from WOS, settings -- updated via WebSocket
+        waveaiModeConfigAtom: jotai.PrimitiveAtom<Record<string, AIModeConfigType>>; // resolved AI mode configs -- updated via WebSocket
         settingsAtom: jotai.Atom<SettingsType>; // derrived from fullConfig
         hasCustomAIPresetsAtom: jotai.Atom<boolean>; // derived from fullConfig
-        tabAtom: jotai.Atom<Tab>; // driven from WOS
         staticTabId: jotai.Atom<string>;
         isFullScreen: jotai.PrimitiveAtom<boolean>;
+        zoomFactorAtom: jotai.PrimitiveAtom<number>;
         controlShiftDelayAtom: jotai.PrimitiveAtom<boolean>;
         prefersReducedMotionAtom: jotai.Atom<boolean>;
+        documentHasFocus: jotai.PrimitiveAtom<boolean>;
         updaterStatusAtom: jotai.PrimitiveAtom<UpdaterStatus>;
-        typeAheadModalAtom: jotai.PrimitiveAtom<TypeAheadModalType>;
         modalOpen: jotai.PrimitiveAtom<boolean>;
         allConnStatus: jotai.Atom<ConnStatus[]>;
         flashErrors: jotai.PrimitiveAtom<FlashErrorType[]>;
         notifications: jotai.PrimitiveAtom<NotificationType[]>;
         notificationPopoverMode: jotai.Atom<boolean>;
         reinitVersion: jotai.PrimitiveAtom<number>;
-        isTermMultiInput: jotai.PrimitiveAtom<boolean>;
         waveAIRateLimitInfoAtom: jotai.PrimitiveAtom<RateLimitInfo>;
     };
 
@@ -55,12 +55,28 @@ declare global {
         blockId: string;
     };
 
+    type GlobalInitOptions = {
+        tabId?: string;
+        platform: NodeJS.Platform;
+        windowId: string;
+        clientId: string;
+        environment: "electron" | "renderer";
+        primaryTabStartup?: boolean;
+        builderId?: string;
+    };
+
     type WaveInitOpts = {
         tabId: string;
         clientId: string;
         windowId: string;
         activate: boolean;
         primaryTabStartup?: boolean;
+    };
+
+    type BuilderInitOpts = {
+        builderId: string;
+        clientId: string;
+        windowId: string;
     };
 
     type ElectronApi = {
@@ -73,11 +89,13 @@ declare global {
         getHostName: () => string; // get-host-name
         getDataDir: () => string; // get-data-dir
         getConfigDir: () => string; // get-config-dir
+        getHomeDir: () => string; // get-home-dir
         getWebviewPreload: () => string; // get-webview-preload
         getAboutModalDetails: () => AboutModalDetails; // get-about-modal-details
-        getDocsiteUrl: () => string; // get-docsite-url
         getZoomFactor: () => number; // get-zoom-factor
-        showContextMenu: (workspaceId: string, menu?: ElectronContextMenuItem[]) => void; // contextmenu-show
+        showWorkspaceAppMenu: (workspaceId: string) => void; // workspace-appmenu-show
+        showBuilderAppMenu: (builderId: string) => void; // builder-appmenu-show
+        showContextMenu: (workspaceId: string, menu: ElectronContextMenuItem[]) => void; // contextmenu-show
         onContextMenuClick: (callback: (id: string) => void) => void; // contextmenu-click
         onNavigate: (callback: (url: string) => void) => void;
         onIframeNavigate: (callback: (url: string) => void) => void;
@@ -103,6 +121,7 @@ declare global {
         closeTab: (workspaceId: string, tabId: string) => void; // close-tab
         setWindowInitStatus: (status: "ready" | "wave-ready") => void; // set-window-init-status
         onWaveInit: (callback: (initOpts: WaveInitOpts) => void) => void; // wave-init
+        onBuilderInit: (callback: (initOpts: BuilderInitOpts) => void) => void; // builder-init
         sendLog: (log: string) => void; // fe-log
         onQuicklook: (filePath: string) => void; // quicklook
         openNativePath(filePath: string): void; // open-native-path
@@ -110,13 +129,19 @@ declare global {
         setKeyboardChordMode: () => void; // set-keyboard-chord-mode
         clearWebviewStorage: (webContentsId: number) => Promise<void>; // clear-webview-storage
         setWaveAIOpen: (isOpen: boolean) => void; // set-waveai-open
+        closeBuilderWindow: () => void; // close-builder-window
+        incrementTermCommands: (opts?: { isRemote?: boolean; isWsl?: boolean; isDurable?: boolean }) => void; // increment-term-commands
+        nativePaste: () => void; // native-paste
+        openBuilder: (appId?: string) => void; // open-builder
+        setBuilderWindowAppId: (appId: string) => void; // set-builder-window-appid
+        doRefresh: () => void; // do-refresh
     };
 
     type ElectronContextMenuItem = {
         id: string; // unique id, used for communication
         label: string;
         role?: string; // electron role (optional)
-        type?: "separator" | "normal" | "submenu" | "checkbox" | "radio";
+        type?: "separator" | "normal" | "submenu" | "checkbox" | "radio" | "header";
         submenu?: ElectronContextMenuItem[];
         checked?: boolean;
         visible?: boolean;
@@ -126,7 +151,7 @@ declare global {
 
     type ContextMenuItem = {
         label?: string;
-        type?: "separator" | "normal" | "submenu" | "checkbox" | "radio";
+        type?: "separator" | "normal" | "submenu" | "checkbox" | "radio" | "header";
         role?: string; // electron role (optional)
         click?: () => void; // not required if role is set
         submenu?: ContextMenuItem[];
@@ -193,7 +218,7 @@ declare global {
     type HeaderText = {
         elemtype: "text";
         text: string;
-        ref?: React.MutableRefObject<HTMLDivElement>;
+        ref?: React.RefObject<HTMLDivElement>;
         className?: string;
         noGrow?: boolean;
         onClick?: (e: React.MouseEvent<any>) => void;
@@ -204,7 +229,7 @@ declare global {
         value: string;
         className?: string;
         isDisabled?: boolean;
-        ref?: React.MutableRefObject<HTMLInputElement>;
+        ref?: React.RefObject<HTMLInputElement>;
         onChange?: (e: React.ChangeEvent<HTMLInputElement>) => void;
         onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void;
         onFocus?: (e: React.FocusEvent<HTMLInputElement>) => void;
@@ -267,11 +292,15 @@ declare global {
 
     declare type ViewComponent = React.FC<ViewComponentProps>;
 
-    type ViewModelClass = new (blockId: string, nodeModel: BlockNodeModel) => ViewModel;
+    type ViewModelClass = new (blockId: string, nodeModel: BlockNodeModel, tabModel: TabModel) => ViewModel;
 
     interface ViewModel {
         // The type of view, used for identifying and rendering the appropriate component.
         viewType: string;
+
+        useTermHeader?: jotai.Atom<boolean>;
+
+        hideViewName?: jotai.Atom<boolean>;
 
         // Icon representing the view, can be a string or an IconButton declaration.
         viewIcon?: jotai.Atom<string | IconButtonDecl>;
@@ -281,6 +310,9 @@ declare global {
 
         // Optional header text or elements for the view.
         viewText?: jotai.Atom<string | HeaderElem[]>;
+
+        termDurableStatus?: jotai.Atom<BlockJobStatusData | null>;
+        termConfigedDurable?: jotai.Atom<null | boolean>;
 
         // Icon button displayed before the title in the header.
         preIconButton?: jotai.Atom<IconButtonDecl>;
@@ -298,9 +330,6 @@ declare global {
 
         // If true, filters out 'nowsh' connections (when managing connections)
         filterOutNowsh?: jotai.Atom<boolean>;
-
-        // if true, show s3 connections in picker
-        showS3?: jotai.Atom<boolean>;
 
         // If true, removes padding inside the block content area.
         noPadding?: jotai.Atom<boolean>;
@@ -475,6 +504,8 @@ declare global {
               size?: number;
               previewurl?: string;
           };
+
+    type AIModeConfigWithMode = { mode: string } & AIModeConfigType;
 }
 
 export {};
